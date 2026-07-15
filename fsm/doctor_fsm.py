@@ -119,7 +119,18 @@ class DoctorFSM:
         from database.db import get_db
         from database import crud
         with get_db() as db:
-            crud.create_session(db, self.session, doctor_id=self.doctor_id)
+            saved = crud.create_session(db, self.session, doctor_id=self.doctor_id)
+            linked_patient = bool(saved.patient_id)
+            linked_appointment = bool(saved.appointment_id)
+
         self.state = DoctorState.SAVED
         self.session = {}
-        return "✅ تم حفظ الجلسة بنجاح! أرسل /session لتسجيل جلسة جديدة."
+
+        link_note = []
+        if linked_patient:
+            link_note.append("تم ربطها بملف المريض")
+        if linked_appointment:
+            link_note.append("تم ربطها بالموعد وتحديثه كمكتمل")
+
+        suffix = "\n🔗 " + "، و".join(link_note) if link_note else "\n⚠️ حُفظت الجلسة بدون ربط تلقائي؛ تأكدي من اسم المريض أو appointment_id."
+        return "✅ تم حفظ الجلسة بنجاح!" + suffix + "\nأرسل /session لتسجيل جلسة جديدة."

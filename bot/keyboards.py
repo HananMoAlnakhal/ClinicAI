@@ -60,26 +60,15 @@ def session_confirm_keyboard() -> ReplyKeyboardMarkup:
 # ── Specialty selection ───────────────────────────────────────────────────────
 
 def specialty_keyboard() -> ReplyKeyboardMarkup:
-    """Shown when classifier confidence is low — let patient choose."""
-    specialties = [
-        ("❤️ قلب وأوعية",        "cardiology"),
-        ("🧠 أعصاب",             "neurology"),
-        ("🦴 عظام ومفاصل",       "orthopedics"),
-        ("🌸 نساء وتوليد",        "gynecology"),
-        ("👶 أطفال",             "pediatrics"),
-        ("🦷 أسنان",             "dentistry"),
-        ("👁️ عيون",              "ophthalmology"),
-        ("🩺 طب عام",            "general_practice"),
+    """Shown when classifier confidence is low — reply buttons are easier for patients."""
+    rows = [
+        ["❤️ قلب وأوعية", "🧠 أعصاب"],
+        ["🦴 عظام ومفاصل", "🌸 نساء وتوليد"],
+        ["👶 أطفال", "🦷 أسنان"],
+        ["👁️ عيون", "🧴 جلدية"],
+        ["🩺 طب عام"],
     ]
-    # Two buttons per row
-    rows = []
-    for i in range(0, len(specialties), 2):
-        row = [
-            ReplyKeyboardMarkup(label, callback_data=f"spec:{key}")
-            for label, key in specialties[i:i+2]
-        ]
-        rows.append(row)
-    return ReplyKeyboardMarkup(rows)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
 
 
 # ── Persistent reply keyboard (always visible) ────────────────────────────────

@@ -27,13 +27,13 @@ def _get_fsm(doctor: object) -> DoctorFSM:
 async def handle_doctor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with get_db() as db:
-        crud.log_message(db, user_id, "inbound", "command", "/start")
+        crud.log_message(db, user_id, "inbound", "command", "/start", role="doctor")
 
     reply = "👨‍⚕️ مرحباً دكتور! ماذا تريد؟"
     await update.message.reply_text(reply, reply_markup=doctor_menu_keyboard())
 
     with get_db() as db:
-        crud.log_bot_reply(db, user_id, reply)
+        crud.log_bot_reply(db, user_id, reply, role="doctor")
 
 
 async def handle_doctor_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,8 +41,8 @@ async def handle_doctor_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text     = update.message.text
 
     with get_db() as db:
-        crud.get_or_create_conversation(db, user_id, update.effective_user.username, update.effective_user.first_name, update.effective_user.last_name)
-        crud.log_message(db, user_id, "inbound", "text", text)
+        crud.get_or_create_conversation(db, user_id, update.effective_user.username, update.effective_user.first_name, update.effective_user.last_name, role="doctor")
+        crud.log_message(db, user_id, "inbound", "text", text, role="doctor")
         doctor = crud.get_doctor_by_telegram(db, user_id)
 
     fsm   = _get_fsm(doctor)
@@ -51,7 +51,7 @@ async def handle_doctor_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(reply, reply_markup=markup, parse_mode="Markdown")
 
     with get_db() as db:
-        crud.log_bot_reply(db, user_id, reply)
+        crud.log_bot_reply(db, user_id, reply, role="doctor")
 
 
 async def handle_doctor_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,14 +64,14 @@ async def handle_doctor_voice(update: Update, context: ContextTypes.DEFAULT_TYPE
     text   = result["text"]
 
     with get_db() as db:
-        crud.get_or_create_conversation(db, user_id, update.effective_user.username, update.effective_user.first_name, update.effective_user.last_name)
-        crud.log_message(db, user_id, "inbound", "voice", text)
+        crud.get_or_create_conversation(db, user_id, update.effective_user.username, update.effective_user.first_name, update.effective_user.last_name, role="doctor")
+        crud.log_message(db, user_id, "inbound", "voice", text, role="doctor")
         doctor = crud.get_doctor_by_telegram(db, user_id)
 
     await update.message.reply_text(f"🎙️ تم التعرف: _{text}_", parse_mode="Markdown")
 
     with get_db() as db:
-        crud.log_bot_reply(db, user_id, f"🎙️ تم التعرف: {text}")
+        crud.log_bot_reply(db, user_id, f"🎙️ تم التعرف: {text}", role="doctor")
 
     fsm   = _get_fsm(doctor)
     reply = await fsm.handle(text, is_voice=True)
@@ -86,8 +86,8 @@ async def handle_doctor_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     with get_db() as db:
-        crud.get_or_create_conversation(db, user_id, query.from_user.username, query.from_user.first_name, query.from_user.last_name)
-        crud.log_message(db, user_id, "inbound", "callback", data or "")
+        crud.get_or_create_conversation(db, user_id, query.from_user.username, query.from_user.first_name, query.from_user.last_name, role="doctor")
+        crud.log_message(db, user_id, "inbound", "callback", data or "", role="doctor")
         doctor = crud.get_doctor_by_telegram(db, user_id)
 
     fsm = _get_fsm(doctor)
