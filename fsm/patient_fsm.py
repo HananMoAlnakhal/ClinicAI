@@ -159,6 +159,9 @@ class PatientFSM:
         if self.state == State.CONFIRM:
             return await self._handle_confirm(norm)
 
+        if self.state == State.FIND_SLOT:
+            return await self._find_slot()
+
         return self._reply("عفواً، ما فهمت. ممكن تعيد؟", None)
 
     async def handle_callback(self, data: str) -> tuple[str, object | None]:
@@ -329,10 +332,9 @@ class PatientFSM:
             if result.get("slot_conflict"):
                 self.slot = None
                 self.state = State.FIND_SLOT
-                return (
-                    "للأسف الموعد انحجز قبل التأكيد بثواني. رح أبحث لك عن أقرب موعد بديل الآن.",
-                    None,
-                )
+                prefix = "للأسف الموعد انحجز قبل التأكيد بثواني. رح أبحث لك عن أقرب موعد بديل الآن.\n\n"
+                reply, keyboard = await self._find_slot()
+                return prefix + reply, keyboard
 
             if result.get("booking_conflict"):
                 conflict = result["booking_conflict"]
@@ -476,8 +478,9 @@ class PatientFSM:
         for label_part, key in SPECIALTY_LABEL_TO_KEY.items():
             if normalize(label_part) in norm:
                 return key
-        if norm in SPECIALTY_NAMES_AR:
-            return norm
+        for key, label_ar in SPECIALTY_NAMES_AR.items():
+            if normalize(label_ar) in norm or norm == normalize(key):
+                return key
         return None
 
     async def _try_ai_extraction(self, text: str):
@@ -535,8 +538,8 @@ class PatientFSM:
     def _is_clarification_request(self, text: str) -> bool:
         lowered = (text or "").lower().strip()
         return bool(lowered) and any(word in lowered for word in [
-            "أنت فهمت", "انت فهمت", "فهمت", "ماذا فهمت", "إيه اللي فهمته", "ايش فهمت",
-            "أشرح", "اشرح", "قلت", "قلتلك", "what did you understand", "what do you know",
+            "أنت فهمت", "انت فهمت", "ماذا فهمت", "إيه اللي فهمته", "ايش فهمت",
+            "أشرح", "اشرح", "what did you understand", "what do you know",
         ])
 
     def _is_new_booking_request(self, text: str) -> bool:

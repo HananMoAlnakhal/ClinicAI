@@ -524,15 +524,6 @@ def reserve_slot_and_create_appointment(db: Session, data: dict, slot_id: int | 
         if conflict:
             return {"appointment": None, "slot_conflict": False, "booking_conflict": conflict}
 
-def create_appointment(db: Session, data: dict, slot: object, patient: Patient):
-    from scheduler.scheduler import AppointmentSlot, book_slot
-
-    appt_id = _ensure_appt_id(data)
-    if isinstance(slot, AppointmentSlot):
-        appt_datetime = slot.slot_datetime
-    else:
-        appt_datetime = getattr(slot, "slot_datetime", None)
-
     status = "confirmed" if appt_datetime else "waitlisted"
     appointment = Appointment(
         appt_id=_ensure_appt_id(data),
@@ -549,20 +540,10 @@ def create_appointment(db: Session, data: dict, slot: object, patient: Patient):
         updated_at=datetime.utcnow(),
     )
     if slot is not None and appt_datetime is not None:
-        try:
-            if isinstance(slot, AppointmentSlot):
-                book_slot(db, slot)
-            else:
-                slot.status = "booked"
-                db.add(slot)
-                db.commit()
-        except Exception:
-            pass
-    db.add(appointment)
-    if slot:
         slot.status = "booked"
         slot.updated_at = datetime.utcnow()
         db.add(slot)
+    db.add(appointment)
     db.flush()
     db.refresh(appointment)
     return {"appointment": appointment, "slot_conflict": False, "booking_conflict": None}
