@@ -82,6 +82,24 @@ DEFAULT_DOCTORS = [
         "clinic_code": "CLINIC-DERM",
         "clinic_name": "عيادة الجلدية",
     },
+    {
+        "name": "د. ماجد عواد",
+        "specialty": "gastroenterology",
+        "clinic_code": "CLINIC-GI",
+        "clinic_name": "عيادة الجهاز الهضمي",
+    },
+    {
+        "name": "د. سلمى قاسم",
+        "specialty": "chronic_diseases",
+        "clinic_code": "CLINIC-CHR",
+        "clinic_name": "عيادة الأمراض المزمنة",
+    },
+    {
+        "name": "د. فؤاد زيدان",
+        "specialty": "elderly",
+        "clinic_code": "CLINIC-ELD",
+        "clinic_name": "عيادة كبار السن",
+    },
 ]
 
 
@@ -197,7 +215,7 @@ def _rebuild_doctors_table_if_needed() -> None:
 
 
 def seed_default_doctors() -> None:
-    """Create/update the eight clinic doctors without requiring Telegram accounts."""
+    """Create/update clinic doctors without requiring Telegram accounts."""
     from .models import Doctor
 
     with SessionLocal() as db:
@@ -564,7 +582,7 @@ def seed_default_slots(days: int = 14) -> None:
 
 
 def init_db() -> None:
-    """Create/migrate DB, seed eight doctors, link slots, then ensure schedules exist."""
+    """Create/migrate DB, seed doctors, link slots, then ensure schedules exist."""
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     migrate_sqlite_schema()

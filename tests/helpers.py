@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timedelta
 from typing import Iterator
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from database.db import Base
 from database import models  # noqa: F401
+from utils.datetime_utils import utcnow
 from database.models import Doctor, Patient, Slot
 
 
@@ -66,12 +68,23 @@ def make_test_session(engine=None) -> Session:
 
 
 @contextmanager
-def test_db_session(engine=None) -> Iterator[Session]:
-    db = make_test_session(engine)
-    try:
+def use_test_db(db: Session) -> Iterator[None]:
+    """Patch every module-level get_db import to use the in-memory session."""
+
+    @contextmanager
+    def _get_db():
         yield db
-    finally:
-        db.close()
+
+    targets = (
+        "database.db.get_db",
+        "bot.router.get_db",
+        "bot.handlers.patient.get_db",
+        "bot.handlers.doctor.get_db",
+    )
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(patch(target, _get_db))
+        yield
 
 
 def seed_doctor(
@@ -99,7 +112,7 @@ def seed_doctor(
 
 
 def seed_patient(db: Session, telegram_id: int = 900001, name: str = "مريض اختبار") -> Patient:
-    patient = Patient(telegram_id=telegram_id, name=name, updated_at=datetime.utcnow())
+    patient = Patient(telegram_id=telegram_id, name=name, updated_at=utcnow())
     db.add(patient)
     db.flush()
     db.refresh(patient)
@@ -116,7 +129,7 @@ def seed_slot(
 ) -> Slot:
     slot = Slot(
         doctor_id=doctor.doctor_id,
-        slot_datetime=when or (datetime.utcnow() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0),
+        slot_datetime=when or (utcnow() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0),
         specialty=doctor.specialty,
         priority_class=priority_class,
         status=status,

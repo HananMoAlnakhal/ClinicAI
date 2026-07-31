@@ -12,6 +12,15 @@ from nlp.normalizer import normalize
 logger = logging.getLogger(__name__)
 
 ROUTING_RULES: list[tuple[str, str]] = [
+        
+    # # ── CARDIOLOGY ─ heart / chest ──
+    # (
+    #     r"قلب|صدر|خفقان|ذبح[هة]\s*صدر|"
+    #     r"ضغط\s*القلب|ألم\s*صدر|الم\s*صدر|"
+    #     r"قصور\s*قلبي|جلط[هة]\s*قلب",
+    #     "cardiology",
+    # ),
+
     # ── NEUROLOGY ─ acute neuro symptoms + breathing difficulty ──
     (
         r"صداع.*شديد|شلل|رعشه|"
@@ -50,6 +59,23 @@ ROUTING_RULES: list[tuple[str, str]] = [
         "gynecology",
     ),
     
+    # # ── PEDIATRICS ─ child-specific ──
+    # (
+    #     r"طفل|طفله|طفلي|رضيع|"
+    #     r"ابني\s*صغير|ابنتي\s*صغيره|"
+    #     r"حمى\s*اطفال|كح[eh]\s*اطفال|"
+    #     r"عمر[اه]?\s*(?:[1-9]|1[0-7])\s*سنه",
+    #     "pediatrics",
+    # ),
+
+    # # ── OPHTHALMOLOGY ─ eye ──
+    # (
+    #     r"عيون|عين|ضعف\s*نظر|"
+    #     r"احمرار\s*عين|الم\s*عين|"
+    #     r"عدم\s*وضوح\s*الرؤيه|رمد",
+    #     "ophthalmology",
+    # ),
+
     # ── DERMATOLOGY ─ skin-specific (fixed bare patterns) ──
     (
         r"طفح.*جلد|طفح\s*حاد|"
@@ -64,6 +90,21 @@ ROUTING_RULES: list[tuple[str, str]] = [
         r"تورم.*وجه|تورم.*جسم)",
         "dermatology",
     ),
+    
+    # # ── DENTISTRY ─ dental ──
+    # (
+    #     r"اسنان|سن\s*مكسور|ضرس|"
+    #     r"الم\s*اسنان|التهاب\s*لث[eh]|"
+    #     r"خلع\s*ضرس|تسوس",
+    #     "dentistry",
+    # ),
+
+    # # Pulmonology and respiratory
+    # (
+    #     r"رئة|تنفس|ربو|"
+    #     r"كحة مزمنة|اختناق|بلغم|التهاب رئة", 
+    #     "pulmonology",
+    # ),
     
     # ── GASTROENTEROLOGY ─ GI symptoms ──
     (
@@ -80,7 +121,7 @@ ROUTING_RULES: list[tuple[str, str]] = [
     
     # ── CHRONIC DISEASES ─ disease program + critical values ──
     (
-        r"سكري|سكر\s*مرتفع|ارتفاع\s*سكر|هبوط\s*سكر|"
+        r"سكري|سكر\s*مرتفع|السكر|ارتفاع\s*سكر|هبوط\s*سكر|"
         r"انسولين|السكر\s*التراكمي|"
         r"متابع[هة]\s*سكر|فحص\s*سكر|"
         r"ضغط\s*الدم|ضغط\s*مرتفع|"
@@ -105,7 +146,7 @@ ROUTING_RULES: list[tuple[str, str]] = [
         r"ضعف\s*عام.*مسن|عدم.*القدره.*على.*الاعتناء",
         "elderly",
     ),
-    
+
     # ── GENERAL PRACTICE ─ routine / mild acute (last resort) ──
     (
         r"حمى|زكام|كحه.*خفيفه|كحه\s*بسيطه|"
@@ -119,10 +160,15 @@ ROUTING_RULES: list[tuple[str, str]] = [
 
 # ── Human-readable Arabic specialty names ─────────────────────────────────────
 SPECIALTY_NAMES_AR = {
+    # "cardiology":        "القلب والأوعية",
     "neurology":         "طب الأعصاب",
     "orthopedics":       "العظام والمفاصل",
     "gynecology":        "النساء والتوليد",
+    # "pediatrics":        "طب الأطفال",
+    # "ophthalmology":     "طب العيون",
     "dermatology":       "الأمراض الجلدية",
+    # "dentistry":         "طب الأسنان",
+    # "pulmonology":       "طب الصدر والجهاز التنفسي",
     "gastroenterology":  "الجهاز الهضمي",
     "chronic_diseases":  "الأمراض المزمنة",
     "elderly":           "كبار السن",
@@ -131,6 +177,31 @@ SPECIALTY_NAMES_AR = {
 
 SPECIALTY_KEYS = set(SPECIALTY_NAMES_AR.keys())
 _VALID_KEY_PATTERN = re.compile(r"[a-z_]+")
+
+# Clinics the product does not operate — detect patient requests early.
+UNSUPPORTED_SPECIALTY_PATTERNS: list[tuple[str, str]] = [
+    (r"اسنان|أسنان|ضرس|لث[eh]|تسوس|خلع\s*ضرس", "طب الأسنان"),
+    (r"صدر(?:يه|ية)?|رئ[eh]|تنفس.*مزمن|التهاب\s*رئ[eh]|pulmonology", "طب الصدر"),
+    (r"قلب|cardiology|ذبح[هة]\s*صدر|خفقان\s*شديد", "القلب والأوعية"),
+    (r"اطفال|أطفال|pediatrics|رضيع|طفل\s*صغير", "طب الأطفال"),
+    (r"عيون|ophthalmology|ضعف\s*نظر|احمرار\s*عين", "طب العيون"),
+    (r"ent\b|اذن|أذن|انف|أنف|حلق\s*واذن", "ENT"),
+]
+
+
+def detect_unsupported_specialty(text: str) -> str | None:
+    """Return Arabic clinic label if text requests a clinic we do not offer."""
+    normalized = normalize(text or "")
+    if not normalized:
+        return None
+    for pattern, label in UNSUPPORTED_SPECIALTY_PATTERNS:
+        if re.search(pattern, normalized):
+            return label
+    return None
+
+
+def is_supported_specialty(key: str | None) -> bool:
+    return bool(key) and key in SPECIALTY_KEYS
 
 
 def _parse_gemini_specialty_key(raw: str) -> str | None:

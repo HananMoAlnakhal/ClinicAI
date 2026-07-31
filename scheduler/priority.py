@@ -25,10 +25,15 @@ THETA_P2 = 0.38 # score >= 0.38 →  P2 (Medium / متوسط)
 
 # ── Specialty urgency levels (f4 encoding) ────────────────────────────────────
 SPECIALTY_SCORES = {
+    # "cardiology":       1.0,
     "neurology":        0.9,
     "orthopedics":      0.5,
     "gynecology":       0.55,
+    # "pediatrics":       0.6,
+    # "ophthalmology":    0.45,
     "dermatology":      0.3,
+    # "dentistry":        0.35,
+    # "pulmonology":      0.60,
     "gastroenterology": 0.45,
     "chronic_diseases": 0.55,
     "elderly":          0.65,

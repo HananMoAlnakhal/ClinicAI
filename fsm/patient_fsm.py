@@ -13,7 +13,12 @@ from typing import Optional
 from nlp.extractor import extract_patient_fields
 from nlp.normalizer import normalize
 from scheduler.priority import score_and_classify
-from scheduler.classifier import classify_specialty, SPECIALTY_NAMES_AR
+from scheduler.classifier import (
+    classify_specialty,
+    classify_with_gemini_fallback,
+    detect_unsupported_specialty,
+    SPECIALTY_NAMES_AR,
+)
 from nlp.gemini_client import gemini
 from bot.keyboards import urgency_keyboard, time_pref_keyboard, confirm_keyboard, specialty_keyboard
 
@@ -26,6 +31,7 @@ class State(Enum):
     COLLECT_TIME = auto()
     VALIDATE = auto()          # requirements-loop checkpoint
     COLLECT_SPECIALTY = auto() # used when classifier confidence is low
+    OFFER_GP_FALLBACK = auto() # unsupported clinic → offer general practice
     CLASSIFY = auto()          # specialty + priority
     FIND_SLOT = auto()
     CONFIRM = auto()
@@ -44,24 +50,31 @@ FIELD_QUESTIONS_AR: dict[str, str] = {
     "time_pref": "متى تحب الموعد؟ (اليوم، بكرا، الأسبوع الجاي...)",
 }
 
-CONFIRM_WORDS = {"نعم", "ايوه", "آيوه", "تمام", "ماشي", "اوك", "ok", "yes", "يلا", "احجز", "تاكيد", "تأكيد", "تاكيد الحجز", "تأكيد الحجز"}
+CONFIRM_WORDS = {"نعم", "ايوه", "آيوه", "تمام", "ماشي", "اوك", "ok", "yes", "يلا", "احجز", "تاكيد", "تأكيد", "تاكيد الحجز", "تأكيد الحجز", "موافق"}
 CANCEL_WORDS = {"لا", "الغي", "إلغي", "الغاء", "إلغاء", "بدي الغي", "مش حابب", "no"}
+EDIT_WORDS = {"تعديل", "تعديل الموعد", "✏️", "✏️ تعديل الموعد"}
+NEXT_SLOT_WORDS = {"موعد آخر", "🔄", "🔄 موعد آخر"}
 
 SPECIALTY_LABEL_TO_KEY = {
-    "قلب": "cardiology",
+    # "قلب": "cardiology",
+    # "اوعيه": "cardiology",
+    # "أوعية": "cardiology",
     "اعصاب": "neurology",
     "أعصاب": "neurology",
     "عظام": "orthopedics",
     "مفاصل": "orthopedics",
     "نساء": "gynecology",
     "توليد": "gynecology",
-    "اطفال": "pediatrics",
-    "أطفال": "pediatrics",
-    "اسنان": "dentistry",
-    "أسنان": "dentistry",
-    "عيون": "ophthalmology",
+    # "اطفال": "pediatrics",
+    # "أطفال": "pediatrics",
+    # "اسنان": "dentistry",
+    # "أسنان": "dentistry",
+    # "عيون": "ophthalmology",
     "جلدية": "dermatology",
     "جلديه": "dermatology",
+    "هضمي": "gastroenterology",
+    "مزمن": "chronic_diseases",
+    "كبار": "elderly",
     "طب عام": "general_practice",
     "عام": "general_practice",
 }
@@ -73,6 +86,8 @@ class PatientFSM:
     state: State = State.GREETING
     data: dict = field(default_factory=dict)
     slot: Optional[dict] = None              # Plain dict, not detached ORM object
+    slot_options: list = field(default_factory=list)
+    slot_index: int = 0
     priority: Optional[object] = None        # PriorityResult
     finalized_appointment_id: Optional[str] = None
 
@@ -95,6 +110,13 @@ class PatientFSM:
             return await self._reply_with_context(text)
 
         if self.state == State.GREETING:
+            self._preload_patient_name()
+            if self.data.get("name"):
+                self.state = State.COLLECT_COMPLAINT
+                return self._reply(
+                    f"أهلاً {self.data['name']}! 👋\n" + FIELD_QUESTIONS_AR["complaint"],
+                    None,
+                )
             self.state = State.COLLECT_NAME
             return self._reply(
                 "أهلاً وسهلاً 👋 أنا المساعد الذكي للحجز في العيادة.\n" + FIELD_QUESTIONS_AR["name"],
@@ -114,13 +136,31 @@ class PatientFSM:
             return self._reply(FIELD_QUESTIONS_AR["name"], None)
 
         if self.state == State.COLLECT_COMPLAINT:
+            unsupported = detect_unsupported_specialty(text)
+            if unsupported:
+                self.data["unsupported_clinic_label"] = unsupported
+                self.state = State.OFFER_GP_FALLBACK
+                return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
             if self.data.get("complaint"):
+                unsupported = detect_unsupported_specialty(self.data["complaint"].get("raw", ""))
+                if unsupported:
+                    self.data["unsupported_clinic_label"] = unsupported
+                    self.state = State.OFFER_GP_FALLBACK
+                    return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
                 self.state = State.COLLECT_URGENCY
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], urgency_keyboard())
 
             complaint = await self._extract_complaint_from_text(text)
             if complaint:
                 self.data["complaint"] = complaint
+                unsupported = detect_unsupported_specialty(complaint.get("raw", ""))
+                if unsupported:
+                    self.data["unsupported_clinic_label"] = unsupported
+                    self.state = State.OFFER_GP_FALLBACK
+                    return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
                 self.state = State.COLLECT_URGENCY
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], urgency_keyboard())
 
@@ -131,15 +171,44 @@ class PatientFSM:
                     "urgency_score": 0.3,
                     "specialty": "general_practice",
                 }
+                unsupported = detect_unsupported_specialty(text.strip())
+                if unsupported:
+                    self.data["unsupported_clinic_label"] = unsupported
+                    self.state = State.OFFER_GP_FALLBACK
+                    return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
                 self.state = State.COLLECT_URGENCY
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], urgency_keyboard())
 
             return self._reply("ممكن تخبرني أكثر عن سبب زيارتك؟", None)
 
         if self.state == State.COLLECT_URGENCY:
-            self._absorb_urgency(norm)
-            self.state = State.COLLECT_TIME
-            return self._reply(FIELD_QUESTIONS_AR["time_pref"], time_pref_keyboard())
+            if not text.strip():
+                return self._reply(FIELD_QUESTIONS_AR["urgency_score"], urgency_keyboard())
+            # Clear incidental NLP defaults; accept only explicit urgency in this message.
+            self.data.pop("urgency_score", None)
+            if self._absorb_urgency(norm):
+                self.state = State.COLLECT_TIME
+                return self._reply(FIELD_QUESTIONS_AR["time_pref"], time_pref_keyboard())
+            return self._reply(
+                "ما فهمت مستوى الأولوية. اكتب عاجل/روتيني/متوسط أو اختار من الأزرار.",
+                urgency_keyboard(),
+            )
+
+        if self.state == State.OFFER_GP_FALLBACK:
+            if any(w in norm for w in CONFIRM_WORDS):
+                self.data["specialty_hint"] = "general_practice"
+                self.data["specialty_ar"] = SPECIALTY_NAMES_AR["general_practice"]
+                self.data["specialty_method"] = "gp_fallback"
+                self.data.pop("unsupported_clinic_label", None)
+                if self._missing_fields():
+                    return await self._run_validate()
+                return await self._score_and_find_slot()
+            if any(w in norm for w in CANCEL_WORDS):
+                self.state = State.CANCELLED
+                return ("تم الإلغاء. إذا احتجت أي شيء، أنا هون. 👋", None)
+            label = self.data.get("unsupported_clinic_label", "هذا التخصص")
+            return self._reply(self._gp_fallback_message(label), confirm_keyboard())
 
         if self.state == State.COLLECT_TIME:
             mapped = self._parse_time_label(text)
@@ -148,6 +217,12 @@ class PatientFSM:
             return await self._run_validate()
 
         if self.state == State.COLLECT_SPECIALTY:
+            unsupported = detect_unsupported_specialty(text)
+            if unsupported:
+                self.data["unsupported_clinic_label"] = unsupported
+                self.state = State.OFFER_GP_FALLBACK
+                return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
             specialty_key = self._parse_specialty_label(text)
             if not specialty_key:
                 return self._reply("اختاري/اختر التخصص الأقرب من الأزرار حتى أحجز الموعد في العيادة المناسبة.", specialty_keyboard())
@@ -198,8 +273,15 @@ class PatientFSM:
         """Merge newly extracted fields and optionally enrich with AI."""
         extracted = extract_patient_fields(text)
         for k, v in extracted.items():
-            if v is not None and not self.data.get(k):
-                self.data[k] = v
+            if v is None or self.data.get(k):
+                continue
+            if k == "name" and self.state not in (State.GREETING, State.COLLECT_NAME):
+                continue
+            if k == "urgency_score" and self.state != State.COLLECT_URGENCY:
+                continue
+            if k == "time_pref" and self.state != State.COLLECT_TIME:
+                continue
+            self.data[k] = v
 
         if text.strip() and len(text.strip()) > 20 and any(self.data.get(f) is None for f in REQUIRED_FIELDS):
             await self._try_ai_extraction(text)
@@ -238,6 +320,11 @@ class PatientFSM:
         missing = self._missing_fields()
         if missing:
             first_missing = missing[0]
+            if first_missing == "name" and self.data.get("name"):
+                missing = [f for f in missing if f != "name"]
+                first_missing = missing[0] if missing else None
+            if not first_missing:
+                return await self._classify_and_schedule()
             self.state = {
                 "name": State.COLLECT_NAME,
                 "complaint": State.COLLECT_COMPLAINT,
@@ -255,14 +342,23 @@ class PatientFSM:
         self.state = State.CLASSIFY
 
         norm_complaint = normalize(self.data.get("complaint", {}).get("raw", ""))
-        spec_result = classify_specialty(norm_complaint)
+        unsupported = detect_unsupported_specialty(norm_complaint)
+        if unsupported:
+            self.data["unsupported_clinic_label"] = unsupported
+            self.state = State.OFFER_GP_FALLBACK
+            return self._reply(self._gp_fallback_message(unsupported), confirm_keyboard())
+
+        if gemini._available:
+            spec_result = await classify_with_gemini_fallback(norm_complaint, gemini)
+        else:
+            spec_result = classify_specialty(norm_complaint)
+
         self.data["specialty_hint"] = spec_result["specialty"]
         self.data["specialty_ar"] = spec_result["specialty_ar"]
         self.data["specialty_method"] = spec_result.get("method")
         self.data["specialty_confidence"] = spec_result.get("confidence")
 
-        # If the classifier only used the default fallback, ask the patient to choose.
-        if spec_result.get("method") == "default" or float(spec_result.get("confidence", 0)) < 0.75:
+        if spec_result.get("method") == "default":
             self.state = State.COLLECT_SPECIALTY
             return self._reply(
                 "حتى أحجزك في العيادة المناسبة، اختاري/اختر أقرب تخصص للشكوى:",
@@ -284,25 +380,23 @@ class PatientFSM:
         from database.db import get_db
         from database import crud
 
+        self.slot_options = []
+        self.slot_index = 0
+        self.slot = None
+
         with get_db() as db:
-            slot = crud.find_next_available_slot(
+            slots = crud.find_available_slots(
                 db,
                 specialty=self.data.get("specialty_hint", "general_practice"),
                 priority_class=self.priority.priority_class,
                 preferred_date=self.data.get("time_pref", {}).get("date"),
                 telegram_id=self.user_id,
+                limit=3,
             )
-            if slot:
-                self.slot = {
-                    "slot_id": slot.slot_id,
-                    "slot_datetime": slot.slot_datetime,
-                    "specialty": slot.doctor.specialty if slot.doctor else slot.specialty,
-                    "priority_class": slot.priority_class,
-                    "doctor_id": slot.doctor.doctor_id if slot.doctor else None,
-                    "doctor_name": slot.doctor.name if slot.doctor else None,
-                    "clinic_code": slot.doctor.clinic_code if slot.doctor else None,
-                    "clinic_name": slot.doctor.clinic_name if slot.doctor else None,
-                }
+            if slots:
+                self.slot_options = [self._slot_to_dict(slot) for slot in slots]
+                self.slot_index = 0
+                self.slot = self.slot_options[0]
 
         if not self.slot:
             await self._save_waitlist()
@@ -314,19 +408,25 @@ class PatientFSM:
             )
 
         self.state = State.CONFIRM
-        dt = self.slot["slot_datetime"].strftime("%A، %d/%m/%Y — %H:%M")
-        return (
-            f"وجدت موعد مناسب! 📅\n\n"
-            f"📆 {dt}\n"
-            f"🏥 التخصص: {self.data.get('specialty_ar', '')}\n"
-            f"👨‍⚕️ الطبيب: {self.slot.get('doctor_name') or '—'}\n"
-            f"🏢 العيادة: {self.slot.get('clinic_name') or '—'} ({self.slot.get('clinic_code') or '—'})\n"
-            f"{self.priority.label_ar} — درجة الأولوية: {self.priority.score:.2f}\n\n"
-            f"تأكد الحجز؟",
-            confirm_keyboard(),
-        )
+        return self._format_confirm_message()
 
     async def _handle_confirm(self, norm: str) -> tuple[str, object | None]:
+        if any(w in norm for w in EDIT_WORDS):
+            self.state = State.COLLECT_TIME
+            return self._reply(
+                "تمام، متى تحب الموعد؟\n" + FIELD_QUESTIONS_AR["time_pref"],
+                time_pref_keyboard(),
+            )
+
+        if any(w in norm for w in NEXT_SLOT_WORDS):
+            if len(self.slot_options) > 1:
+                self.slot_index = (self.slot_index + 1) % len(self.slot_options)
+                self.slot = self.slot_options[self.slot_index]
+                extra = f"\n\n(خيار {self.slot_index + 1} من {len(self.slot_options)})"
+                reply, keyboard = self._format_confirm_message()
+                return reply + extra, keyboard
+            return self._reply("هذا هو أقرب موعد متاح حالياً.", confirm_keyboard())
+
         if any(w in norm for w in CONFIRM_WORDS):
             result = await self._finalize()
             if result.get("slot_conflict"):
@@ -385,7 +485,7 @@ class PatientFSM:
             self.state = State.CANCELLED
             return ("تم الإلغاء. إذا احتجت أي شيء، أنا هون. 👋", None)
 
-        return ("اكتب نعم لتأكيد الحجز، أو لا للإلغاء.", confirm_keyboard())
+        return ("اكتب ✅ لتأكيد الحجز، ✏️ للتعديل، 🔄 لموعد آخر، أو ❌ للإلغاء.", confirm_keyboard())
 
     async def _finalize(self) -> dict:
         from database.db import get_db
@@ -408,13 +508,26 @@ class PatientFSM:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _absorb_urgency(self, norm: str):
-        if any(w in norm for w in ["عاجل", "طارئ", "فوري", "خطير"]):
+    def _absorb_urgency(self, norm: str) -> bool:
+        score = self._score_from_label(norm)
+        if score is not None:
+            self.data["urgency_score"] = score
+            return True
+
+        if any(w in norm for w in ["عاجل", "طارئ", "فوري", "خطير", "🔴"]):
             self.data["urgency_score"] = max(float(self.data.get("urgency_score", 0)), 0.85)
-        elif any(w in norm for w in ["روتيني", "مش عاجل", "اي وقت", "أي وقت"]):
+            return True
+        if any(w in norm for w in ["روتيني", "مش عاجل", "🟢"]):
             self.data["urgency_score"] = min(float(self.data.get("urgency_score", 0.5)), 0.25)
-        else:
-            self.data.setdefault("urgency_score", 0.4)
+            return True
+        if any(w in norm for w in ["متوسط", "خلال أسبوع", "خلال اسبوع", "🟡", "عادي"]):
+            self.data["urgency_score"] = 0.5
+            return True
+        if any(w in norm for w in ["اي وقت", "أي وقت"]) and self.state == State.COLLECT_URGENCY:
+            self.data["urgency_score"] = 0.25
+            return True
+
+        return False
 
     def _score_from_label(self, label: str | None) -> float | None:
         if not label:
@@ -487,12 +600,12 @@ class PatientFSM:
         if not gemini._available:
             return
 
-        if not self.data.get("name"):
+        if not self.data.get("name") and self.state in (State.GREETING, State.COLLECT_NAME):
             name = await gemini.extract_missing_field(text, "name")
             if name:
                 self.data["name"] = name.strip()
 
-        if not self.data.get("complaint"):
+        if not self.data.get("complaint") and self.state in (State.GREETING, State.COLLECT_NAME, State.COLLECT_COMPLAINT):
             complaint = await gemini.extract_missing_field(text, "complaint")
             if complaint:
                 self.data["complaint"] = {
@@ -502,13 +615,13 @@ class PatientFSM:
                     "specialty": "general_practice",
                 }
 
-        if not self.data.get("urgency_score"):
+        if not self.data.get("urgency_score") and self.state == State.COLLECT_URGENCY:
             urgency = await gemini.extract_missing_field(text, "urgency")
             score = self._score_from_label(urgency)
             if score is not None:
                 self.data["urgency_score"] = score
 
-        if not self.data.get("time_pref"):
+        if not self.data.get("time_pref") and self.state == State.COLLECT_TIME:
             time_pref = await gemini.extract_missing_field(text, "time_pref")
             if time_pref:
                 self.data["time_pref"] = {"date": None, "phrase": time_pref.strip()}
@@ -535,6 +648,52 @@ class PatientFSM:
             return self._reply(f"فهمت إن اسمك {self.data['name']}. أقدر أكمّل معك الحجز خطوة بخطوة.", None)
         return self._reply("فهمت إنك بدك مساعدة، وأنا جاهز أكمّل معك خطوة بخطوة.", None)
 
+    def _preload_patient_name(self) -> None:
+        if self.data.get("name"):
+            return
+        from database.db import get_db
+        from database import crud
+
+        with get_db() as db:
+            patient = crud.get_patient_by_telegram_id(db, self.user_id)
+            if patient and patient.name:
+                self.data["name"] = patient.name.strip()
+
+    def _gp_fallback_message(self, label: str) -> str:
+        return (
+            f"عذراً، {label} غير متوفرة لدينا حالياً.\n"
+            f"نقدر نحجزك في {SPECIALTY_NAMES_AR['general_practice']}.\n"
+            "موافق؟ (✅ تأكيد / ❌ إلغاء)"
+        )
+
+    def _slot_to_dict(self, slot) -> dict:
+        return {
+            "slot_id": slot.slot_id,
+            "slot_datetime": slot.slot_datetime,
+            "specialty": slot.doctor.specialty if slot.doctor else slot.specialty,
+            "priority_class": slot.priority_class,
+            "doctor_id": slot.doctor.doctor_id if slot.doctor else None,
+            "doctor_name": slot.doctor.name if slot.doctor else None,
+            "clinic_code": slot.doctor.clinic_code if slot.doctor else None,
+            "clinic_name": slot.doctor.clinic_name if slot.doctor else None,
+        }
+
+    def _format_confirm_message(self) -> tuple[str, object | None]:
+        dt = self.slot["slot_datetime"].strftime("%A، %d/%m/%Y — %H:%M")
+        alt_hint = ""
+        if len(self.slot_options) > 1:
+            alt_hint = f"\n\n🔄 في {len(self.slot_options) - 1} مواعيد بديلة — اضغط «موعد آخر» للتبديل."
+        return (
+            f"وجدت موعد مناسب! 📅\n\n"
+            f"📆 {dt}\n"
+            f"🏥 التخصص: {self.data.get('specialty_ar', '')}\n"
+            f"👨‍⚕️ الطبيب: {self.slot.get('doctor_name') or '—'}\n"
+            f"🏢 العيادة: {self.slot.get('clinic_name') or '—'} ({self.slot.get('clinic_code') or '—'})\n"
+            f"{alt_hint}\n"
+            f"تأكد الحجز؟",
+            confirm_keyboard(),
+        )
+
     def _is_clarification_request(self, text: str) -> bool:
         lowered = (text or "").lower().strip()
         return bool(lowered) and any(word in lowered for word in [
@@ -550,6 +709,8 @@ class PatientFSM:
         self.state = State.GREETING
         self.data.clear()
         self.slot = None
+        self.slot_options = []
+        self.slot_index = 0
         self.priority = None
         self.finalized_appointment_id = None
 

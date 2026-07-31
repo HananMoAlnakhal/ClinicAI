@@ -69,7 +69,7 @@ class TestGeminiFallback(unittest.IsolatedAsyncioTestCase):
 
     async def test_gemini_returns_unknown_key_falls_back_to_default(self):
         mock_client = AsyncMock()
-        mock_client.ask.return_value = "cardiology"
+        mock_client.ask.return_value = "radiology"
         r = await classify_with_gemini_fallback(self._VAGUE, mock_client)
         self.assertEqual(r["method"], "default")
         self.assertEqual(r["specialty"], "general_practice")

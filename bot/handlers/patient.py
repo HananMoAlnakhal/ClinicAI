@@ -86,7 +86,6 @@ def _format_appointment(appt) -> str:
         f"التخصص: {specialty}\n"
         f"الطبيب: {doctor.name if doctor else '—'}\n"
         f"العيادة: {doctor.clinic_name if doctor else '—'}\n"
-        f"الأولوية: {appt.priority_class or '—'}\n"
         f"الحالة: {status_ar}"
     )
 
