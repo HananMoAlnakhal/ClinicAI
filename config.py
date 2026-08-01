@@ -31,3 +31,5 @@ DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = _get_int_env("DASHBOARD_PORT", 8000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+USE_SLOT_POLICY = os.getenv("USE_SLOT_POLICY", "true").strip().lower() in {"1", "true", "yes", "on"}

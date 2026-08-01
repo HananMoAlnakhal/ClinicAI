@@ -249,7 +249,7 @@ class TestSchedulingPolicy(unittest.TestCase):
     def setUp(self):
         self.db = make_test_session()
         self.doctor = seed_doctor(self.db, specialty="general_practice", clinic_code="CLINIC-POLICY")
-        self.when = (utcnow() + timedelta(days=6)).replace(hour=9, minute=0, second=0, microsecond=0)
+        self.when = (utcnow() + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
         self.p1_slot = seed_slot(self.db, self.doctor, when=self.when, priority_class="P1")
         self.p3_slot = seed_slot(
             self.db,

@@ -157,3 +157,21 @@ class DoctorFSM:
 
         suffix = "\n🔗 " + "، و".join(link_note) if link_note else "\n⚠️ حُفظت الجلسة بدون ربط تلقائي؛ تأكدي من اسم المريض أو appointment_id."
         return "✅ تم حفظ الجلسة بنجاح!" + suffix + "\nأرسل /session لتسجيل جلسة جديدة."
+
+    def to_snapshot(self) -> dict:
+        return {
+            "state": self.state.name,
+            "data_json": {"session": self.session},
+        }
+
+    @classmethod
+    def from_snapshot(cls, doctor_id: int, telegram_id: int, row) -> DoctorFSM:
+        fsm = cls(doctor_id=doctor_id, telegram_id=telegram_id)
+        fsm.state = DoctorState[row.state]
+        data = row.data_json or {}
+        fsm.session = data.get("session") or {}
+        return fsm
+
+    def discard(self) -> None:
+        self.state = DoctorState.IDLE
+        self.session = {}

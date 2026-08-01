@@ -338,6 +338,38 @@ def _rebuild_slots_table_with_doctor_fk() -> None:
         conn.commit()
 
 
+def _ensure_fsm_sessions_table() -> None:
+    """Create fsm_sessions table on existing SQLite DBs (additive migration)."""
+    if not DB_FILE.exists():
+        return
+
+    engine.dispose()
+    with sqlite3.connect(DB_FILE) as conn:
+        if _sqlite_table_exists(conn, "fsm_sessions"):
+            return
+        conn.execute(
+            """
+            CREATE TABLE fsm_sessions (
+                session_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                role VARCHAR(32) NOT NULL DEFAULT 'patient',
+                state VARCHAR(64) NOT NULL,
+                data_json JSON,
+                slot_options_json JSON,
+                slot_index INTEGER NOT NULL DEFAULT 0,
+                slot_json JSON,
+                priority_json JSON,
+                finalized_appointment_id VARCHAR(64),
+                updated_at DATETIME,
+                UNIQUE (telegram_id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_fsm_sessions_telegram_id ON fsm_sessions (telegram_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_fsm_sessions_role ON fsm_sessions (role)")
+        conn.commit()
+
+
 def migrate_sqlite_schema() -> None:
     """Bring the bundled SQLite DB to the V4 schema while preserving its data."""
     if not DB_FILE.exists():
@@ -373,6 +405,8 @@ def migrate_sqlite_schema() -> None:
     _sqlite_add_column("conversations", "role", "VARCHAR(32) DEFAULT 'patient'")
     _sqlite_add_column("message_logs", "conversation_id", "INTEGER")
     _sqlite_add_column("message_logs", "patient_id", "INTEGER")
+
+    _ensure_fsm_sessions_table()
 
 
 

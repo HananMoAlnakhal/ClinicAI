@@ -17,6 +17,7 @@ from sqlalchemy.orm import relationship
 
 from .db import Base
 from utils.datetime_utils import utcnow
+from utils.datetime_utils import utcnow
 
 
 class Patient(Base):
@@ -158,3 +159,19 @@ class PatientProfile(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     patient = relationship("Patient", back_populates="profile")
+
+
+class FsmSession(Base):
+    __tablename__ = "fsm_sessions"
+
+    session_id = Column(Integer, primary_key=True, autoincrement=True)
+    telegram_id = Column(Integer, unique=True, index=True, nullable=False)
+    role = Column(String(32), nullable=False, default="patient", index=True)
+    state = Column(String(64), nullable=False)
+    data_json = Column(JSON, nullable=True)
+    slot_options_json = Column(JSON, nullable=True)
+    slot_index = Column(Integer, nullable=False, default=0)
+    slot_json = Column(JSON, nullable=True)
+    priority_json = Column(JSON, nullable=True)
+    finalized_appointment_id = Column(String(64), nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

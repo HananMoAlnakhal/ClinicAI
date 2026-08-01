@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime, timezone
 
 from telegram import Update
@@ -11,12 +12,13 @@ from bot.keyboards import main_menu_keyboard
 from config import TTS_ENABLED, TTS_RESPONSE_MODE
 from database import crud
 from database.db import get_db
-from fsm.patient_fsm import PatientFSM
-from nlp.gemini_client import gemini
+from fsm.fsm_result import keyboard_for_action
+from fsm.patient_fsm import PatientFSM, State
+from fsm.ui_actions import UIAction
 from voice.stt import transcribe_voice
 from voice.tts import text_to_ogg
 
-_sessions: dict[int, PatientFSM] = {}
+logger = logging.getLogger(__name__)
 
 
 def _is_repeat_request(text: str) -> bool:
@@ -33,6 +35,7 @@ def _is_repeat_request(text: str) -> bool:
             "ابدأ من جديد",
             "بدء جديد",
             "حجز موعد جديد",
+            "📅 حجز موعد جديد",
         ]
     )
 
@@ -42,9 +45,10 @@ def _is_inquiry_request(text: str) -> bool:
     return "استعلام" in lowered or "موعدي" in lowered or "🔍" in lowered
 
 
-def _is_cancel_request(text: str) -> bool:
+def _is_menu_cancel_request(text: str) -> bool:
+    """Full main-menu label only — not bare ❌ (confirm keyboard uses ❌ إلغاء)."""
     lowered = (text or "").lower().strip()
-    return "إلغاء موعد" in lowered or "الغاء موعد" in lowered or "❌" in lowered
+    return "إلغاء موعد" in lowered or "الغاء موعد" in lowered
 
 
 def _is_contact_request(text: str) -> bool:
@@ -52,12 +56,38 @@ def _is_contact_request(text: str) -> bool:
     return "تواصل" in lowered or "📞" in lowered
 
 
+def _should_allow_menu_shortcut(fsm: PatientFSM, text: str) -> bool:
+    if fsm.is_done or fsm.state == State.GREETING:
+        return True
+    return (
+        _is_repeat_request(text)
+        or _is_inquiry_request(text)
+        or _is_menu_cancel_request(text)
+        or _is_contact_request(text)
+    )
+
+
 def _get_fsm(user_id: int, reset: bool = False) -> PatientFSM:
-    session = _sessions.get(user_id)
-    if reset or session is None:
-        session = PatientFSM(user_id=user_id)
-        _sessions[user_id] = session
-    return session
+    if reset:
+        with get_db() as db:
+            crud.delete_fsm_session(db, user_id, role="patient")
+        fsm = PatientFSM(user_id=user_id)
+        _persist_fsm(fsm)
+        return fsm
+
+    with get_db() as db:
+        row = crud.get_fsm_session(db, user_id, role="patient")
+        if row:
+            return PatientFSM.from_snapshot(user_id, row)
+    fsm = PatientFSM(user_id=user_id)
+    _persist_fsm(fsm)
+    return fsm
+
+
+def _persist_fsm(fsm: PatientFSM) -> None:
+    with get_db() as db:
+        snapshot = fsm.to_snapshot()
+        crud.upsert_fsm_session(db, fsm.user_id, role="patient", **snapshot)
 
 
 def _format_appointment(appt) -> str:
@@ -104,10 +134,6 @@ async def _send_patient_reply(
     keyboard=None,
     incoming_was_voice: bool = False,
 ) -> bool:
-    """
-    Always send readable text (and any keyboard). When TTS is enabled, also send
-    an OGG voice response according to TTS_RESPONSE_MODE. Returns True if voice sent.
-    """
     await message.reply_text(reply, reply_markup=keyboard)
     if not _should_send_voice(incoming_was_voice):
         return False
@@ -120,8 +146,7 @@ async def _send_patient_reply(
         await message.reply_voice(voice=voice_file)
         return True
     except Exception as exc:
-        # TTS must never break the booking conversation; text remains the fallback.
-        print(f"[ClinicAI TTS] Voice reply failed; text reply was sent: {exc}")
+        logger.warning("TTS voice reply failed; text reply was sent: %s", exc)
         return False
 
 
@@ -144,7 +169,7 @@ def _menu_response(user_id: int, text: str):
             reply = _format_appointment(appt)
         return reply, main_menu_keyboard()
 
-    if _is_cancel_request(text):
+    if _is_menu_cancel_request(text):
         with get_db() as db:
             appt = crud.cancel_latest_patient_appointment(db, user_id)
         reply = (
@@ -161,6 +186,19 @@ def _menu_response(user_id: int, text: str):
         )
 
     return None
+
+
+async def _handle_fsm_turn(user_id: int, text: str) -> tuple[str, object | None]:
+    fsm = _get_fsm(user_id)
+    reply, action, _payload = await fsm.handle(text)
+
+    if reply.strip() == "عفواً، ما فهمت. ممكن تعيد؟":
+        fallback = await fsm.maybe_gemini_fallback(text)
+        if fallback:
+            reply = fallback
+
+    _persist_fsm(fsm)
+    return reply, keyboard_for_action(action)
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,23 +233,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_start(update, context)
         return
 
-    menu = _menu_response(user.id, text)
-    if menu:
-        reply, keyboard = menu
-        voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=False)
-        _log_outbound(user.id, reply, voice_sent)
-        return
-
     fsm = _get_fsm(user.id)
-    reply, keyboard = await fsm.handle(text)
-    if reply.strip() == "عفواً، ما فهمت. ممكن تعيد؟" and gemini._available:
-        try:
-            g_reply = await gemini.build_response(fsm.state.name, {**fsm.data, "last_user_message": text})
-            if g_reply:
-                reply = g_reply
-        except Exception:
-            pass
+    if _should_allow_menu_shortcut(fsm, text):
+        menu = _menu_response(user.id, text)
+        if menu:
+            reply, keyboard = menu
+            voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=False)
+            _log_outbound(user.id, reply, voice_sent)
+            return
 
+    reply, keyboard = await _handle_fsm_turn(user.id, text)
     voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=False)
     _log_outbound(user.id, reply, voice_sent)
 
@@ -230,7 +261,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = transcribe_voice(bytes(ogg_bytes), filename_prefix=f"{uname}_{ts}")
         text = result.get("text", "").strip()
     except Exception as exc:
-        print(f"[ClinicAI STT] Voice transcription failed: {exc}")
+        logger.warning("Voice transcription failed: %s", exc)
         text = ""
 
     with get_db() as db:
@@ -243,26 +274,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _log_outbound(user.id, reply, voice_sent)
         return
 
-    # Show the recognized text so the patient can verify what the system understood.
     await message.reply_text(f"🎙️ فهمت رسالتك كالتالي:\n{text}")
 
-    menu = _menu_response(user.id, text)
-    if menu:
-        reply, keyboard = menu
-        voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=True)
-        _log_outbound(user.id, reply, voice_sent)
-        return
-
     fsm = _get_fsm(user.id)
-    reply, keyboard = await fsm.handle(text)
-    if reply.strip() == "عفواً، ما فهمت. ممكن تعيد؟" and gemini._available:
-        try:
-            g_reply = await gemini.build_response(fsm.state.name, {**fsm.data, "last_user_message": text})
-            if g_reply:
-                reply = g_reply
-        except Exception:
-            pass
+    if _should_allow_menu_shortcut(fsm, text):
+        menu = _menu_response(user.id, text)
+        if menu:
+            reply, keyboard = menu
+            voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=True)
+            _log_outbound(user.id, reply, voice_sent)
+            return
 
+    reply, keyboard = await _handle_fsm_turn(user.id, text)
     voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=True)
     _log_outbound(user.id, reply, voice_sent)
 
@@ -291,17 +314,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:inquiry":
         with get_db() as db:
             reply = _format_appointment(crud.get_latest_patient_appointment(db, user_id))
-        keyboard = None
+        keyboard = main_menu_keyboard()
     elif data == "menu:cancel":
         with get_db() as db:
             appt = crud.cancel_latest_patient_appointment(db, user_id)
         reply = "تم إلغاء آخر موعد مؤكد/منتظر. ✅" if appt else "لا يوجد موعد لإلغائه حالياً."
-        keyboard = None
+        keyboard = main_menu_keyboard()
     elif data == "menu:contact":
-        reply, keyboard = "📞 اكتب رسالتك هنا، وسيتم حفظها في سجل محادثات العيادة.", None
+        reply, keyboard = "📞 اكتب رسالتك هنا، وسيتم حفظها في سجل محادثات العيادة.", main_menu_keyboard()
     else:
         fsm = _get_fsm(user_id)
-        reply, keyboard = await fsm.handle_callback(data)
+        reply, action, _ = await fsm.handle_callback(data)
+        _persist_fsm(fsm)
+        keyboard = keyboard_for_action(action)
 
     await query.edit_message_text(reply, reply_markup=keyboard)
     voice_sent = False
@@ -314,5 +339,5 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_voice(voice=voice_file)
             voice_sent = True
         except Exception as exc:
-            print(f"[ClinicAI TTS] Callback voice reply failed; text reply was sent: {exc}")
+            logger.warning("Callback voice reply failed: %s", exc)
     _log_outbound(user_id, reply, voice_sent=voice_sent)

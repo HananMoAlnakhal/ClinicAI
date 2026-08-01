@@ -25,6 +25,16 @@ from database import crud
 from database.models import Appointment, Doctor, PatientProfile, Slot
 from scheduler.classifier import classify_specialty, classify_with_gemini_fallback
 from scheduler.priority import score_and_classify
+from scheduler.slot_policy import (
+    FALLBACK_SPECIALTY,
+    SlotView,
+    filter_by_block_rules,
+    filter_by_wave_rules,
+    rank_slots as policy_rank_slots,
+    select_best_slot as policy_select_best_slot,
+)
+from utils.datetime_utils import utcnow
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +44,9 @@ PRIORITY_CLASSES = frozenset({"P1", "P2", "P3"})
 APPOINTMENT_STATUSES = frozenset(
     {"confirmed", "waitlisted", "completed", "no_show", "cancelled"}
 )
-FALLBACK_SPECIALTY = "general_practice"
 
-BLOCK_ACCESS = {
-    "P1": {"P1","P2","P3",None},
-    "P2": {"P2","P3",None},
-    "P3": {"P3",None}
-}
-
-WAVE_HORIZON_DAYS: dict[str, int] = {
-    "P1": 2,
-    "P2": 7,
-    "P3": 30,
-}
-
-
-def _utcnow() -> datetime:
-    """Timezone-aware UTC now, compatible with naive datetimes stored in DB."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-# ── Types (read-only DTOs) ────────────────────────────────────────────────────
+# Re-export unified policy constants for backward compatibility.
+from scheduler.slot_policy import BLOCK_ACCESS, WAVE_HORIZON_DAYS  # noqa: E402
 
 def _parse_doctor_id(notes: str | None) -> int | None:
     """Legacy helper: extract doctor_id from notes text. Prefer Slot.doctor_id FK."""
@@ -159,7 +151,7 @@ def sanitize_input(data: dict[str, Any]) -> dict[str, Any]:
         data["urgency_score"] = 0.3
 
     if "arrival_time" not in data:
-        data["arrival_time"] = _utcnow().isoformat()
+        data["arrival_time"] = utcnow().isoformat()
 
     return data
 
@@ -218,46 +210,29 @@ def slot_utilization_by_day(db: Session, specialty: str) -> dict[tuple[str, date
 # ── Slots ─────────────────────────────────────────────────────────────────────
 
 def get_available_slots(db: Session, specialty: str) -> list[AppointmentSlot]:
-    """
-    Fetch available slots for the requested specialty.
-    Fallback: general_practice only — never random specialties.
-    """
-    rows = _query_slots(db, specialty)
+    """Fetch available slots for the requested specialty with GP fallback."""
+    from scheduler.slot_policy import build_slot_query
+
+    now = utcnow()
+    rows = list(db.scalars(build_slot_query(specialty, "P1")).all())
     if rows:
-        return [AppointmentSlot.from_orm(r) for r in rows]
+        return [AppointmentSlot.from_orm(r) for r in rows if r.slot_datetime >= now]
 
     if specialty != FALLBACK_SPECIALTY:
-        rows = _query_slots(db, FALLBACK_SPECIALTY)
+        rows = list(db.scalars(build_slot_query(FALLBACK_SPECIALTY, "P1")).all())
         if rows:
-            return [AppointmentSlot.from_orm(r) for r in rows]
+            return [AppointmentSlot.from_orm(r) for r in rows if r.slot_datetime >= now]
 
     return []
-
-
-def _query_slots(db: Session, specialty: str) -> list[Slot]:
-    """Fetch available future slots owned by an active doctor."""
-    now = _utcnow()
-    stmt = (
-        select(Slot)
-        .join(Slot.doctor)
-        .options(joinedload(Slot.doctor))
-        .where(
-            Slot.specialty == specialty,
-            Slot.status == "available",
-            Slot.slot_datetime >= now,
-            Doctor.is_active.is_(True),
-        )
-        .order_by(Slot.slot_datetime)
-    )
-    return list(db.scalars(stmt).all())
 
 
 def apply_block_rules(
     slots: list[AppointmentSlot],
     priority_class: str,
 ) -> list[AppointmentSlot]:
-    allowed = BLOCK_ACCESS.get(priority_class, {None})
-    return [s for s in slots if s.priority_class in allowed]
+    views = filter_by_block_rules([_slot_to_view(s) for s in slots], priority_class)
+    allowed_ids = {v.slot_id for v in views}
+    return [s for s in slots if s.slot_id in allowed_ids]
 
 
 def apply_wave_rules(
@@ -266,16 +241,26 @@ def apply_wave_rules(
     *,
     now: datetime | None = None,
 ) -> list[AppointmentSlot]:
-    """Restrict slots to the priority-class wave horizon.
+    views = filter_by_wave_rules([_slot_to_view(s) for s in slots], priority_class, now=now or utcnow())
+    allowed_ids = {v.slot_id for v in views}
+    return [s for s in slots if s.slot_id in allowed_ids]
 
-    Unlike the previous version, this does NOT fall back to all slots when
-    the wave window is empty.  An empty result means "no slots in your wave
-    horizon" and the caller should route to the waitlist.
-    """
-    now = now or _utcnow()
-    horizon_days = WAVE_HORIZON_DAYS.get(priority_class, 7)
-    wave_end = now + timedelta(days=horizon_days)
-    return [s for s in slots if now <= s.slot_datetime <= wave_end]
+
+def _slot_to_view(slot: AppointmentSlot) -> SlotView:
+    return SlotView(
+        slot_id=slot.slot_id,
+        slot_datetime=slot.slot_datetime,
+        specialty=slot.specialty,
+        priority_class=slot.priority_class,
+        doctor_id=slot.doctor_id,
+    )
+
+
+def _build_slot_sort_key(slot: AppointmentSlot, **kwargs):
+    """Backward-compatible wrapper for ranking unit tests."""
+    from scheduler.slot_policy import _build_slot_sort_key as policy_key
+
+    return policy_key(_slot_to_view(slot), **kwargs)
 
 
 def book_slot(db: Session, slot: AppointmentSlot) -> None:
@@ -305,28 +290,6 @@ def book_slot(db: Session, slot: AppointmentSlot) -> None:
 
 # ── Ranking ───────────────────────────────────────────────────────────────────
 
-def _build_slot_sort_key(
-    slot: AppointmentSlot,
-    *,
-    pref_day: date | None,
-    priority_class: str,
-    clinic_load: dict[tuple[str, date], int],
-    doctor_load: dict[tuple[int, date], int],
-    utilization: dict[tuple[str, date], float],
-) -> tuple:
-    day = slot.slot_datetime.date()
-    day_match = 0 if (pref_day is None or day == pref_day) else 1
-    block_match = 0 if slot.priority_class == priority_class else 1
-    c_load = clinic_load.get((slot.specialty, day), 0)
-    d_load = doctor_load.get((slot.doctor_id, day), 0) if slot.doctor_id else 0
-    util = utilization.get((slot.specialty, day), 0.0)
-
-    # P1: earliest slot wins even on busier days; P2/P3: spread load first
-    if priority_class == "P1":
-        return (day_match, block_match, slot.slot_datetime, c_load, d_load, util)
-    return (day_match, block_match, c_load, d_load, util, slot.slot_datetime)
-
-
 def rank_slots(
     db: Session,
     slots: list[AppointmentSlot],
@@ -336,22 +299,16 @@ def rank_slots(
     priority_score: float,
     preferred_date: str | None = None,
 ) -> list[AppointmentSlot]:
-    pref_day = _parse_preferred_date(preferred_date)
-    clinic_load = clinic_load_by_day(db, specialty)
-    doctor_load = doctor_load_by_day(db)
-    utilization = slot_utilization_by_day(db, specialty)
-
-    return sorted(
-        slots,
-        key=lambda s: _build_slot_sort_key(
-            s,
-            pref_day=pref_day,
-            priority_class=priority_class,
-            clinic_load=clinic_load,
-            doctor_load=doctor_load,
-            utilization=utilization,
-        ),
+    ranked = policy_rank_slots(
+        db,
+        [_slot_to_view(s) for s in slots],
+        specialty=specialty,
+        priority_class=priority_class,
+        priority_score=priority_score,
+        preferred_date=preferred_date,
     )
+    order = {view.slot_id: idx for idx, view in enumerate(ranked)}
+    return sorted(slots, key=lambda s: order.get(s.slot_id, len(order)))
 
 
 def select_best_slot(
@@ -435,7 +392,7 @@ def _load_queue(db: Session, specialty: str) -> list[WaitlistCandidate]:
                     appt.priority_class or "P3", 0.2
                 ),
                 urgency_score=0.3,
-                arrival_time=appt.created_at or _utcnow(),
+                arrival_time=appt.created_at or utcnow(),
                 telegram_id=tg_id,
             )
         )
@@ -491,7 +448,7 @@ def enqueue_waitlist(
     arrival_time: datetime | None = None,
     telegram_id: int | None = None,
 ) -> WaitlistEntry:
-    arrival = arrival_time or _utcnow()
+    arrival = arrival_time or utcnow()
     candidate = WaitlistCandidate(
         specialty=specialty,
         priority_class=priority_class,
@@ -569,7 +526,7 @@ async def plan_appointment(
     try:
         arrival_time = datetime.fromisoformat(str(safe_data.get("arrival_time")))
     except (TypeError, ValueError):
-        arrival_time = _utcnow()
+        arrival_time = utcnow()
 
     telegram_id = safe_data.get("telegram_id") or safe_data.get("user_id")
 

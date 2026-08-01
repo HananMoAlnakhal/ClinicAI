@@ -147,6 +147,39 @@ ROUTING_RULES: list[tuple[str, str]] = [
         "elderly",
     ),
 
+    # ── CARDIOLOGY ─ heart / chest ──
+    (
+        r"قلب|صدر|خفقان|ذبح[هة]\s*صدر|"
+        r"ضغط\s*القلب|ألم\s*صدر|الم\s*صدر|"
+        r"قصور\s*قلبي|جلط[هة]\s*قلب",
+        "cardiology",
+    ),
+
+    # ── PEDIATRICS ─ child-specific ──
+    (
+        r"طفل|طفله|طفلي|رضيع|"
+        r"ابني\s*صغير|ابنتي\s*صغيره|"
+        r"حمى\s*اطفال|كح[eh]\s*اطفال|"
+        r"عمر[اه]?\s*(?:[1-9]|1[0-7])\s*سنه",
+        "pediatrics",
+    ),
+
+    # ── DENTISTRY ─ dental ──
+    (
+        r"اسنان|سن\s*مكسور|ضرس|"
+        r"الم\s*اسنان|التهاب\s*لث[eh]|"
+        r"خلع\s*ضرس|تسوس",
+        "dentistry",
+    ),
+
+    # ── OPHTHALMOLOGY ─ eye ──
+    (
+        r"عيون|عين|ضعف\s*نظر|"
+        r"احمرار\s*عين|الم\s*عين|"
+        r"عدم\s*وضوح\s*الرؤيه|رمد",
+        "ophthalmology",
+    ),
+
     # ── GENERAL PRACTICE ─ routine / mild acute (last resort) ──
     (
         r"حمى|زكام|كحه.*خفيفه|كحه\s*بسيطه|"

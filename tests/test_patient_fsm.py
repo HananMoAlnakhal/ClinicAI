@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from fsm.patient_fsm import PatientFSM, State, REQUIRED_FIELDS, FIELD_QUESTIONS_AR, SPECIALTY_LABEL_TO_KEY
-from tests.helpers import run_async
+from fsm.patient_fsm import PatientFSM, State, REQUIRED_FIELDS, FIELD_QUESTIONS_AR, SPECIALTY_LABEL_TO_KEY, SPECIALTY_LABEL_TO_KEY, SPECIALTY_LABEL_TO_KEY
+from tests.helpers import run_async, unpack_fsm
 
 
 def _high_confidence_classify(*args, **kwargs):
@@ -69,20 +69,20 @@ class TestPatientFSMConversation(unittest.TestCase):
         self.fsm = PatientFSM(user_id=80002)
 
     def test_greeting_asks_for_name(self):
-        reply, keyboard = run_async(self.fsm.handle("مرحبا"))
+        reply, keyboard = unpack_fsm(run_async(self.fsm.handle("مرحبا")))
         self.assertEqual(self.fsm.state, State.COLLECT_NAME)
         self.assertIn(FIELD_QUESTIONS_AR["name"], reply)
         self.assertIsNone(keyboard)
 
     def test_collect_name_then_complaint(self):
         run_async(self.fsm.handle("start"))
-        reply, _ = run_async(self.fsm.handle("سارة محمود"))
+        reply, _ = unpack_fsm(run_async(self.fsm.handle("سارة محمود")))
         self.assertEqual(self.fsm.state, State.COLLECT_COMPLAINT)
         self.assertIn("سارة", reply)
 
     def test_collect_complaint_from_plain_text(self):
         self.fsm.state = State.COLLECT_COMPLAINT
-        reply, keyboard = run_async(self.fsm.handle("عندي صداع من يومين"))
+        reply, keyboard = unpack_fsm(run_async(self.fsm.handle("عندي صداع من يومين")))
         self.assertEqual(self.fsm.state, State.COLLECT_URGENCY)
         self.assertIn("complaint", self.fsm.data)
         self.assertIsNotNone(keyboard)
@@ -90,7 +90,7 @@ class TestPatientFSMConversation(unittest.TestCase):
     def test_urgency_callback_moves_to_time(self):
         self.fsm.state = State.COLLECT_URGENCY
         self.fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
-        reply, keyboard = run_async(self.fsm.handle_callback("urgency:P2"))
+        reply, keyboard = unpack_fsm(run_async(self.fsm.handle_callback("urgency:P2")))
         self.assertEqual(self.fsm.state, State.COLLECT_TIME)
         self.assertEqual(self.fsm.data["urgency_score"], 0.5)
         self.assertIsNotNone(keyboard)
@@ -128,12 +128,16 @@ class TestPatientFSMConversation(unittest.TestCase):
             yield MagicMock()
 
         with patch("database.db.get_db", fake_get_db):
-            with patch("database.crud.find_available_slots", return_value=[slot]):
-                run_async(self.fsm.handle("start"))
-                run_async(self.fsm.handle("أحمد"))
-                run_async(self.fsm.handle("صداع خفيف"))
-                run_async(self.fsm.handle("روتيني"))
-                reply, keyboard = run_async(self.fsm.handle("بكرا"))
+            self.fsm.services.classify = mock_classify_rules
+            self.fsm.services.classify_with_fallback = mock_classify
+            self.fsm.services.score = mock_score
+            self.fsm.services.find_slots = MagicMock(return_value=[slot])
+            self.fsm.services.gemini = mock_gemini
+            run_async(self.fsm.handle("start"))
+            run_async(self.fsm.handle("أحمد"))
+            run_async(self.fsm.handle("صداع خفيف"))
+            run_async(self.fsm.handle("روتيني"))
+            reply, keyboard = unpack_fsm(run_async(self.fsm.handle("بكرا")))
 
         self.assertEqual(self.fsm.state, State.CONFIRM)
         self.assertIn("وجدت موعد", reply)
@@ -174,11 +178,10 @@ class TestPatientFSMConversation(unittest.TestCase):
             yield MagicMock()
 
         with patch("database.db.get_db", fake_get_db):
-            with patch(
-                "database.crud.create_patient_file_and_book",
+            self.fsm.services.book = MagicMock(
                 return_value={"appointment": appt, "slot_conflict": False, "booking_conflict": None},
-            ):
-                reply, _ = run_async(self.fsm.handle("نعم"))
+            )
+            reply, _ = unpack_fsm(run_async(self.fsm.handle("نعم")))
 
         self.assertEqual(self.fsm.state, State.FINALIZED)
         self.assertIn("تم تأكيد حجزك", reply)
@@ -187,7 +190,7 @@ class TestPatientFSMConversation(unittest.TestCase):
     def test_confirm_no_cancels(self):
         self.fsm.state = State.CONFIRM
         self.fsm.slot = {"slot_id": 1}
-        reply, _ = run_async(self.fsm.handle("لا"))
+        reply, _ = unpack_fsm(run_async(self.fsm.handle("لا")))
         self.assertEqual(self.fsm.state, State.CANCELLED)
         self.assertIn("تم الإلغاء", reply)
 
@@ -202,11 +205,10 @@ class TestPatientFSMConversation(unittest.TestCase):
 
         with patch("fsm.patient_fsm.gemini") as mock_gemini:
             mock_gemini._available = False
-            with patch(
-                "fsm.patient_fsm.classify_specialty",
+            self.fsm.services.classify = MagicMock(
                 return_value={"specialty": "general_practice", "specialty_ar": "الطب العام", "method": "default", "confidence": 0.5},
-            ):
-                reply, keyboard = run_async(self.fsm.handle("اليوم"))
+            )
+            reply, keyboard = unpack_fsm(run_async(self.fsm.handle("اليوم")))
 
         self.assertEqual(self.fsm.state, State.COLLECT_SPECIALTY)
         self.assertIn("تخصص", reply)
@@ -228,9 +230,8 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}, "urgency_score": 0.4}
 
         with patch("fsm.patient_fsm.classify_specialty") as mock_classify:
-            reply, _ = run_async(fsm.handle(""))
-
-        mock_classify.assert_not_called()
+            mock_classify.assert_not_called()
+            reply, _ = unpack_fsm(run_async(fsm.handle("")))
         self.assertEqual(fsm.state, State.COLLECT_TIME)
         self.assertIn("محتاجين", reply)
 
@@ -239,7 +240,7 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm.state = State.COLLECT_COMPLAINT
         fsm.data = {"name": "سارة"}
 
-        reply, _ = run_async(fsm.handle("فهمت، عندي صداع"))
+        reply, _ = unpack_fsm(run_async(fsm.handle("فهمت، عندي صداع")))
 
         self.assertEqual(fsm.state, State.COLLECT_URGENCY)
         self.assertNotIn("فهمت إن", reply)
@@ -253,7 +254,53 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm.state = State.COLLECT_URGENCY
         fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
 
-        reply, keyboard = run_async(fsm.handle("xyz gibberish"))
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("xyz gibberish")))
+
+        self.assertEqual(fsm.state, State.COLLECT_URGENCY)
+        self.assertNotIn("urgency_score", fsm.data)
+        self.assertIn("الأولوية", reply)
+        self.assertIsNotNone(keyboard)
+
+    def test_specialty_label_keys_match_classifier(self):
+        from scheduler.classifier import SPECIALTY_NAMES_AR
+
+        for key in set(SPECIALTY_LABEL_TO_KEY.values()):
+            self.assertIn(key, SPECIALTY_NAMES_AR, f"missing classifier entry for {key}")
+
+    def test_keyboard_specialty_labels_parse(self):
+        fsm = PatientFSM(user_id=81006)
+        self.assertEqual(fsm._parse_specialty_label("❤️ قلب وأوعية"), "cardiology")
+        self.assertEqual(fsm._parse_specialty_label("🧓 كبار السن"), "elderly")
+
+    def test_unclear_urgency_stays_in_collect_urgency(self):
+        fsm = PatientFSM(user_id=81005)
+        fsm.state = State.COLLECT_URGENCY
+        fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
+
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("xyz gibberish")))
+
+        self.assertEqual(fsm.state, State.COLLECT_URGENCY)
+        self.assertNotIn("urgency_score", fsm.data)
+        self.assertIn("الأولوية", reply)
+        self.assertIsNotNone(keyboard)
+
+    def test_specialty_label_keys_match_classifier(self):
+        from scheduler.classifier import SPECIALTY_NAMES_AR
+
+        for key in set(SPECIALTY_LABEL_TO_KEY.values()):
+            self.assertIn(key, SPECIALTY_NAMES_AR, f"missing classifier entry for {key}")
+
+    def test_keyboard_specialty_labels_parse(self):
+        fsm = PatientFSM(user_id=81006)
+        self.assertEqual(fsm._parse_specialty_label("❤️ قلب وأوعية"), "cardiology")
+        self.assertEqual(fsm._parse_specialty_label("🧓 كبار السن"), "elderly")
+
+    def test_unclear_urgency_stays_in_collect_urgency(self):
+        fsm = PatientFSM(user_id=81005)
+        fsm.state = State.COLLECT_URGENCY
+        fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
+
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("xyz gibberish")))
 
         self.assertEqual(fsm.state, State.COLLECT_URGENCY)
         self.assertNotIn("urgency_score", fsm.data)
@@ -328,14 +375,13 @@ class TestPatientFSMLogic(unittest.TestCase):
             yield MagicMock()
 
         with patch("database.db.get_db", fake_get_db):
-            with patch(
-                "database.crud.create_patient_file_and_book",
+            fsm.services.book = MagicMock(
                 return_value={"appointment": None, "slot_conflict": True, "booking_conflict": None},
-            ):
-                with patch("database.crud.find_available_slots", return_value=[new_slot]) as mock_find:
-                    reply, keyboard = run_async(fsm.handle("نعم"))
+            )
+            fsm.services.find_slots = MagicMock(return_value=[new_slot])
+            reply, keyboard = unpack_fsm(run_async(fsm.handle("نعم")))
 
-        mock_find.assert_called_once()
+        fsm.services.find_slots.assert_called_once()
         self.assertEqual(fsm.state, State.CONFIRM)
         self.assertEqual(fsm.slot["slot_id"], 2)
         self.assertIn("انحجز قبل التأكيد", reply)
@@ -346,7 +392,7 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm = PatientFSM(user_id=81007)
         fsm.state = State.COLLECT_COMPLAINT
         fsm.data = {"name": "أحمد"}
-        reply, keyboard = run_async(fsm.handle("بدي موعد عند طبيب اسنان"))
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("بدي موعد عند طبيب اسنان")))
         self.assertEqual(fsm.state, State.OFFER_GP_FALLBACK)
         self.assertIn("غير متوفرة", reply)
         self.assertIsNotNone(keyboard)
@@ -355,7 +401,7 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm = PatientFSM(user_id=81008)
         fsm.state = State.COLLECT_URGENCY
         fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
-        reply, keyboard = run_async(fsm.handle("عاجل"))
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("عاجل")))
         self.assertEqual(fsm.state, State.COLLECT_TIME)
         self.assertGreaterEqual(fsm.data["urgency_score"], 0.85)
         self.assertIsNotNone(keyboard)
@@ -365,7 +411,7 @@ class TestPatientFSMLogic(unittest.TestCase):
         fsm.state = State.CONFIRM
         fsm.slot = {"slot_id": 1, "slot_datetime": datetime.utcnow()}
         fsm.data = {"name": "أحمد", "time_pref": {"date": str(date.today()), "phrase": "اليوم"}}
-        reply, keyboard = run_async(fsm.handle("✏️ تعديل الموعد"))
+        reply, keyboard = unpack_fsm(run_async(fsm.handle("✏️ تعديل الموعد")))
         self.assertEqual(fsm.state, State.COLLECT_TIME)
         self.assertIn("متى", reply)
         self.assertIsNotNone(keyboard)

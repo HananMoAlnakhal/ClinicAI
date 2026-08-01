@@ -1,20 +1,20 @@
 """Scheduler package — Tier-1 real-time booking."""
 
-import logging
-
-_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-logging.basicConfig(
-    level=logging.INFO,
-    format=_LOG_FORMAT,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
 from scheduler.scheduler import (
     AppointmentSlot,
     ScheduleDecision,
     WaitlistEntry,
-    book_slot,
     plan_appointment,
+)
+from scheduler.slot_policy import (
+    BLOCK_ACCESS,
+    FALLBACK_SPECIALTY,
+    WAVE_HORIZON_DAYS,
+    filter_by_block_rules,
+    filter_by_wave_rules,
+    rank_slots,
+    select_best_slot,
+    select_slots,
 )
 
 __all__ = [
@@ -22,5 +22,12 @@ __all__ = [
     "AppointmentSlot",
     "ScheduleDecision",
     "WaitlistEntry",
-    "book_slot",
+    "BLOCK_ACCESS",
+    "FALLBACK_SPECIALTY",
+    "WAVE_HORIZON_DAYS",
+    "filter_by_block_rules",
+    "filter_by_wave_rules",
+    "rank_slots",
+    "select_best_slot",
+    "select_slots",
 ]

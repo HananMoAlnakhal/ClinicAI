@@ -86,12 +86,12 @@ class TestDoctorFSMFlow(unittest.TestCase):
         self.assertIn("الحقل", reply)
 
     def test_editing_unknown_field_shows_help(self):
-        self.fsm.state = DoctorState.EDITING
+        self.fsm.state = DoctorState.REVIEW
         self.fsm.session = dict(SAMPLE_SESSION)
 
         reply = run_async(self.fsm.handle("عدّل شي"))
 
-        self.assertIn("ما عرفت", reply)
+        self.assertIn("تأكيد", reply)
 
     def test_saved_state_prompts_new_session(self):
         self.fsm.state = DoctorState.SAVED

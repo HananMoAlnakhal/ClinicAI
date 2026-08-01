@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from database.db import Base
 from database import models  # noqa: F401
 from utils.datetime_utils import utcnow
-from database.models import Doctor, Patient, Slot
+from utils.datetime_utils import utcnow
+from database.models import Doctor, FsmSession, Patient, Slot
 
 
 def infer_urgency_score(text: str) -> float:
@@ -42,6 +43,14 @@ def run_async(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def unpack_fsm(result):
+    """Convert FSM (reply, action, payload) to (reply, keyboard) for tests."""
+    from fsm.fsm_result import keyboard_for_action
+
+    reply, action, _payload = result
+    return reply, keyboard_for_action(action)
 
 
 def make_test_engine():
