@@ -1,13 +1,10 @@
 """Unit tests for fsm/doctor_fsm.py — doctor session note FSM."""
-import os
-import sys
-import unittest
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import pytest
 
-from fsm.doctor_fsm import DoctorFSM, DoctorState, EDITABLE_FIELDS
+from fsm.doctor_fsm import EDITABLE_FIELDS, DoctorFSM, DoctorState
 from tests.helpers import run_async
 
 
@@ -22,122 +19,123 @@ SAMPLE_SESSION = {
 }
 
 
-class TestDoctorFSMFlow(unittest.TestCase):
-    def setUp(self):
-        self.fsm = DoctorFSM(doctor_id=1, telegram_id=70001)
-
-    def test_idle_moves_to_listening_with_instructions(self):
-        reply = run_async(self.fsm.handle("أي نص"))
-        self.assertEqual(self.fsm.state, DoctorState.LISTENING)
-        self.assertIn("ملاحظات الجلسة", reply)
-
-    def test_listening_extracts_and_shows_review(self):
-        self.fsm.state = DoctorState.LISTENING
-
-        with patch("nlp.doctor_extractor.extract_session_fields", return_value=SAMPLE_SESSION):
-            reply = run_async(self.fsm.handle("المريض اسمه أحمد خالد، شاكي من ألم ركبة"))
-
-        self.assertEqual(self.fsm.state, DoctorState.REVIEW)
-        self.assertIn("أحمد خالد", reply)
-        self.assertIn("Ibuprofen", reply)
-        self.assertIn("تأكيد", reply)
-
-    def test_review_confirm_saves_session(self):
-        self.fsm.state = DoctorState.REVIEW
-        self.fsm.session = dict(SAMPLE_SESSION)
-        self.fsm.session["raw_transcription"] = "note"
-
-        saved = MagicMock()
-        saved.patient_id = 10
-        saved.appointment_id = "appt_1"
-
-        @contextmanager
-        def fake_get_db():
-            yield MagicMock()
-
-        with patch("database.db.get_db", fake_get_db):
-            with patch("database.crud.create_session", return_value=saved) as mock_create:
-                reply = run_async(self.fsm.handle("تأكيد"))
-
-        mock_create.assert_called_once()
-        self.assertEqual(self.fsm.state, DoctorState.SAVED)
-        self.assertEqual(self.fsm.session, {})
-        self.assertIn("تم حفظ الجلسة", reply)
-        self.assertIn("ربطها بملف المريض", reply)
-
-    def test_review_edit_field_updates_summary(self):
-        self.fsm.state = DoctorState.REVIEW
-        self.fsm.session = dict(SAMPLE_SESSION)
-
-        reply = run_async(self.fsm.handle("الشكوى: وجع ظهر"))
-
-        self.assertEqual(self.fsm.state, DoctorState.REVIEW)
-        self.assertEqual(self.fsm.session["chief_complaint"], "وجع ظهر")
-        self.assertIn("تم تحديث", reply)
-        self.assertIn("وجع ظهر", reply)
-
-    def test_review_unknown_input_shows_save_hint(self):
-        self.fsm.state = DoctorState.REVIEW
-        self.fsm.session = dict(SAMPLE_SESSION)
-
-        reply = run_async(self.fsm.handle("عدّل شي"))
-
-        self.assertIn("تأكيد", reply)
-        self.assertIn("الحقل", reply)
-
-    def test_editing_unknown_field_shows_help(self):
-        self.fsm.state = DoctorState.REVIEW
-        self.fsm.session = dict(SAMPLE_SESSION)
-
-        reply = run_async(self.fsm.handle("عدّل شي"))
-
-        self.assertIn("تأكيد", reply)
-
-    def test_saved_state_prompts_new_session(self):
-        self.fsm.state = DoctorState.SAVED
-        reply = run_async(self.fsm.handle("مرحبا"))
-        self.assertIn("/session", reply)
+@pytest.fixture
+def doctor_fsm():
+    return DoctorFSM(doctor_id=1, telegram_id=70001)
 
 
-class TestDoctorFSMConstants(unittest.TestCase):
-    def test_editable_fields_cover_summary_labels(self):
-        labels = set(EDITABLE_FIELDS.keys())
-        self.assertIn("اسم المريض", labels)
-        self.assertIn("الشكوى", labels)
-        self.assertIn("المتابعة", labels)
-
-    def test_medication_edit_updates_medications_list(self):
-        fsm = DoctorFSM(doctor_id=1, telegram_id=70002)
-        fsm.state = DoctorState.REVIEW
-        fsm.session = dict(SAMPLE_SESSION)
-
-        run_async(fsm.handle("الدواء: Paracetamol, Ibuprofen"))
-
-        self.assertEqual(
-            fsm.session["medications"],
-            [{"name": "Paracetamol"}, {"name": "Ibuprofen"}],
-        )
-
-    def test_followup_edit_parses_integer(self):
-        fsm = DoctorFSM(doctor_id=1, telegram_id=70003)
-        fsm.state = DoctorState.REVIEW
-        fsm.session = dict(SAMPLE_SESSION)
-
-        run_async(fsm.handle("المتابعة: 21"))
-
-        self.assertEqual(fsm.session["followup_days"], 21)
-
-    def test_session_command_resets_to_listening(self):
-        fsm = DoctorFSM(doctor_id=1, telegram_id=70004)
-        fsm.state = DoctorState.SAVED
-        fsm.session = {"patient_name": "old"}
-
-        reply = run_async(fsm.handle("/session"))
-
-        self.assertEqual(fsm.state, DoctorState.LISTENING)
-        self.assertEqual(fsm.session, {})
-        self.assertIn("ملاحظات الجلسة", reply)
+def test_idle_moves_to_listening_with_instructions(doctor_fsm):
+    reply = run_async(doctor_fsm.handle("أي نص"))
+    assert doctor_fsm.state == DoctorState.LISTENING
+    assert "ملاحظات الجلسة" in reply
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+def test_listening_extracts_and_shows_review(doctor_fsm):
+    doctor_fsm.state = DoctorState.LISTENING
+    with patch("nlp.doctor_extractor.extract_session_fields", return_value=SAMPLE_SESSION):
+        reply = run_async(doctor_fsm.handle("المريض اسمه أحمد خالد، شاكي من ألم ركبة"))
+
+    assert doctor_fsm.state == DoctorState.REVIEW
+    assert "أحمد خالد" in reply
+    assert "Ibuprofen" in reply
+    assert "تأكيد" in reply
+
+
+def test_review_confirm_saves_session(doctor_fsm):
+    doctor_fsm.state = DoctorState.REVIEW
+    doctor_fsm.session = dict(SAMPLE_SESSION)
+    doctor_fsm.session["raw_transcription"] = "note"
+
+    saved = MagicMock()
+    saved.patient_id = 10
+    saved.appointment_id = "appt_1"
+
+    @contextmanager
+    def fake_get_db():
+        yield MagicMock()
+
+    with patch("database.db.get_db", fake_get_db):
+        with patch("database.crud.create_session", return_value=saved) as mock_create:
+            reply = run_async(doctor_fsm.handle("تأكيد"))
+
+    mock_create.assert_called_once()
+    assert doctor_fsm.state == DoctorState.SAVED
+    assert doctor_fsm.session == {}
+    assert "تم حفظ الجلسة" in reply
+    assert "ربطها بملف المريض" in reply
+
+
+def test_review_edit_field_updates_summary(doctor_fsm):
+    doctor_fsm.state = DoctorState.REVIEW
+    doctor_fsm.session = dict(SAMPLE_SESSION)
+
+    reply = run_async(doctor_fsm.handle("الشكوى: وجع ظهر"))
+
+    assert doctor_fsm.state == DoctorState.REVIEW
+    assert doctor_fsm.session["chief_complaint"] == "وجع ظهر"
+    assert "تم تحديث" in reply
+    assert "وجع ظهر" in reply
+
+
+def test_review_unknown_input_shows_save_hint(doctor_fsm):
+    doctor_fsm.state = DoctorState.REVIEW
+    doctor_fsm.session = dict(SAMPLE_SESSION)
+
+    reply = run_async(doctor_fsm.handle("عدّل شي"))
+
+    assert "تأكيد" in reply
+    assert "الحقل" in reply
+
+
+def test_editing_unknown_field_shows_help(doctor_fsm):
+    doctor_fsm.state = DoctorState.REVIEW
+    doctor_fsm.session = dict(SAMPLE_SESSION)
+
+    reply = run_async(doctor_fsm.handle("عدّل شي"))
+
+    assert "تأكيد" in reply
+
+
+def test_saved_state_prompts_new_session(doctor_fsm):
+    doctor_fsm.state = DoctorState.SAVED
+    reply = run_async(doctor_fsm.handle("مرحبا"))
+    assert "/session" in reply
+
+
+def test_editable_fields_cover_summary_labels():
+    labels = set(EDITABLE_FIELDS.keys())
+    assert "اسم المريض" in labels
+    assert "الشكوى" in labels
+    assert "المتابعة" in labels
+
+
+def test_medication_edit_updates_medications_list():
+    fsm = DoctorFSM(doctor_id=1, telegram_id=70002)
+    fsm.state = DoctorState.REVIEW
+    fsm.session = dict(SAMPLE_SESSION)
+
+    run_async(fsm.handle("الدواء: Paracetamol, Ibuprofen"))
+
+    assert fsm.session["medications"] == [{"name": "Paracetamol"}, {"name": "Ibuprofen"}]
+
+
+def test_followup_edit_parses_integer():
+    fsm = DoctorFSM(doctor_id=1, telegram_id=70003)
+    fsm.state = DoctorState.REVIEW
+    fsm.session = dict(SAMPLE_SESSION)
+
+    run_async(fsm.handle("المتابعة: 21"))
+
+    assert fsm.session["followup_days"] == 21
+
+
+def test_session_command_resets_to_listening():
+    fsm = DoctorFSM(doctor_id=1, telegram_id=70004)
+    fsm.state = DoctorState.SAVED
+    fsm.session = {"patient_name": "old"}
+
+    reply = run_async(fsm.handle("/session"))
+
+    assert fsm.state == DoctorState.LISTENING
+    assert fsm.session == {}
+    assert "ملاحظات الجلسة" in reply

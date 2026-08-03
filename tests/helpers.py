@@ -2,24 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timedelta
 from typing import Iterator
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from database.db import Base
 from database import models  # noqa: F401
+from database.models import Doctor, Patient, Slot
 from utils.datetime_utils import utcnow
-from utils.datetime_utils import utcnow
-from database.models import Doctor, FsmSession, Patient, Slot
-
 
 def infer_urgency_score(text: str) -> float:
     t = text

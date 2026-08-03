@@ -1,11 +1,4 @@
 """Unit tests for database/models.py — schema, defaults, and relationships."""
-import os
-import sys
-import unittest
-from datetime import datetime
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from sqlalchemy import inspect
 
 from database.models import (
@@ -18,118 +11,115 @@ from database.models import (
     Session as DoctorSession,
     Slot,
 )
-from tests.helpers import make_test_session, seed_doctor, seed_patient, seed_slot
+from tests.helpers import seed_doctor, seed_patient, seed_slot
 
 
-class TestModelTables(unittest.TestCase):
-    def setUp(self):
-        self.db = make_test_session()
-
-    def tearDown(self):
-        self.db.close()
-
-    def test_all_expected_tables_exist(self):
-        names = set(inspect(self.db.bind).get_table_names())
-        expected = {
-            "patients",
-            "doctors",
-            "appointments",
-            "sessions",
-            "slots",
-            "conversations",
-            "message_logs",
-            "patient_profiles",
-        }
-        self.assertTrue(expected.issubset(names))
-
-    def test_patient_defaults_and_unique_telegram(self):
-        p1 = Patient(telegram_id=111, name="أحمد")
-        p2 = Patient(telegram_id=222, name="سارة")
-        self.db.add_all([p1, p2])
-        self.db.commit()
-
-        self.assertIsNotNone(p1.patient_id)
-        self.assertIsNotNone(p1.created_at)
-        self.assertEqual(p1.name, "أحمد")
-
-    def test_doctor_requires_clinic_identity(self):
-        doctor = seed_doctor(self.db, specialty="cardiology", clinic_code="CLINIC-CARD-TEST")
-        self.assertTrue(doctor.is_active)
-        self.assertEqual(doctor.specialty, "cardiology")
-        self.assertIsNone(doctor.telegram_id)
-
-    def test_slot_belongs_to_doctor(self):
-        doctor = seed_doctor(self.db)
-        slot = seed_slot(self.db, doctor, status="available")
-        self.assertEqual(slot.doctor_id, doctor.doctor_id)
-        self.assertEqual(slot.status, "available")
-        self.assertEqual(slot.doctor.specialty, doctor.specialty)
-
-    def test_appointment_links_patient_and_slot(self):
-        patient = seed_patient(self.db, telegram_id=333)
-        doctor = seed_doctor(self.db, specialty="neurology", clinic_code="CLINIC-NEURO-T")
-        slot = seed_slot(self.db, doctor)
-        appt = Appointment(
-            appt_id="appt_test_001",
-            patient_id=patient.patient_id,
-            slot_id=slot.slot_id,
-            appt_datetime=slot.slot_datetime,
-            specialty=doctor.specialty,
-            status="confirmed",
-        )
-        self.db.add(appt)
-        self.db.commit()
-
-        self.assertEqual(appt.patient.patient_id, patient.patient_id)
-        self.assertEqual(appt.slot.slot_id, slot.slot_id)
-
-    def test_doctor_session_optional_patient_and_appointment(self):
-        doctor = seed_doctor(self.db, clinic_code="CLINIC-GP-T2")
-        session = DoctorSession(
-            doctor_id=doctor.doctor_id,
-            patient_name="مريض بدون ملف",
-            chief_complaint="صداع",
-            diagnosis="صداع توتري",
-        )
-        self.db.add(session)
-        self.db.commit()
-
-        self.assertIsNone(session.patient_id)
-        self.assertIsNone(session.appointment_id)
-        self.assertEqual(session.doctor.doctor_id, doctor.doctor_id)
-
-    def test_patient_profile_json_payload(self):
-        patient = seed_patient(self.db, telegram_id=444)
-        profile = PatientProfile(
-            patient_id=patient.patient_id,
-            telegram_id=patient.telegram_id,
-            data={"name": patient.name, "last_complaint": "ألم ظهر"},
-        )
-        self.db.add(profile)
-        self.db.commit()
-
-        loaded = self.db.get(PatientProfile, profile.profile_id)
-        self.assertEqual(loaded.data["last_complaint"], "ألم ظهر")
-        self.assertEqual(loaded.patient.patient_id, patient.patient_id)
-
-    def test_conversation_and_message_log(self):
-        conversation = Conversation(telegram_id=555, role="patient")
-        self.db.add(conversation)
-        self.db.flush()
-
-        log = MessageLog(
-            conversation_id=conversation.conversation_id,
-            telegram_id=555,
-            direction="inbound",
-            message_type="text",
-            content="مرحبا",
-        )
-        self.db.add(log)
-        self.db.commit()
-
-        self.assertEqual(len(conversation.messages), 1)
-        self.assertEqual(conversation.messages[0].content, "مرحبا")
+def test_all_expected_tables_exist(db_session):
+    names = set(inspect(db_session.bind).get_table_names())
+    expected = {
+        "patients",
+        "doctors",
+        "appointments",
+        "sessions",
+        "slots",
+        "conversations",
+        "message_logs",
+        "patient_profiles",
+        "fsm_sessions",
+    }
+    assert expected.issubset(names)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+def test_patient_defaults_and_unique_telegram(db_session):
+    p1 = Patient(telegram_id=111, name="أحمد")
+    p2 = Patient(telegram_id=222, name="سارة")
+    db_session.add_all([p1, p2])
+    db_session.commit()
+
+    assert p1.patient_id is not None
+    assert p1.created_at is not None
+    assert p1.name == "أحمد"
+
+
+def test_doctor_requires_clinic_identity(db_session):
+    doctor = seed_doctor(db_session, specialty="cardiology", clinic_code="CLINIC-CARD-TEST")
+    assert doctor.is_active
+    assert doctor.specialty == "cardiology"
+    assert doctor.telegram_id is None
+
+
+def test_slot_belongs_to_doctor(db_session):
+    doctor = seed_doctor(db_session)
+    slot = seed_slot(db_session, doctor, status="available")
+    assert slot.doctor_id == doctor.doctor_id
+    assert slot.status == "available"
+    assert slot.doctor.specialty == doctor.specialty
+
+
+def test_appointment_links_patient_and_slot(db_session):
+    patient = seed_patient(db_session, telegram_id=333)
+    doctor = seed_doctor(db_session, specialty="neurology", clinic_code="CLINIC-NEURO-T")
+    slot = seed_slot(db_session, doctor)
+    appt = Appointment(
+        appt_id="appt_test_001",
+        patient_id=patient.patient_id,
+        slot_id=slot.slot_id,
+        appt_datetime=slot.slot_datetime,
+        specialty=doctor.specialty,
+        status="confirmed",
+    )
+    db_session.add(appt)
+    db_session.commit()
+
+    assert appt.patient.patient_id == patient.patient_id
+    assert appt.slot.slot_id == slot.slot_id
+
+
+def test_doctor_session_optional_patient_and_appointment(db_session):
+    doctor = seed_doctor(db_session, clinic_code="CLINIC-GP-T2")
+    session = DoctorSession(
+        doctor_id=doctor.doctor_id,
+        patient_name="مريض بدون ملف",
+        chief_complaint="صداع",
+        diagnosis="صداع توتري",
+    )
+    db_session.add(session)
+    db_session.commit()
+
+    assert session.patient_id is None
+    assert session.appointment_id is None
+    assert session.doctor.doctor_id == doctor.doctor_id
+
+
+def test_patient_profile_json_payload(db_session):
+    patient = seed_patient(db_session, telegram_id=444)
+    profile = PatientProfile(
+        patient_id=patient.patient_id,
+        telegram_id=patient.telegram_id,
+        data={"name": patient.name, "last_complaint": "ألم ظهر"},
+    )
+    db_session.add(profile)
+    db_session.commit()
+
+    loaded = db_session.get(PatientProfile, profile.profile_id)
+    assert loaded.data["last_complaint"] == "ألم ظهر"
+    assert loaded.patient.patient_id == patient.patient_id
+
+
+def test_conversation_and_message_log(db_session):
+    conversation = Conversation(telegram_id=555, role="patient")
+    db_session.add(conversation)
+    db_session.flush()
+
+    log = MessageLog(
+        conversation_id=conversation.conversation_id,
+        telegram_id=555,
+        direction="inbound",
+        message_type="text",
+        content="مرحبا",
+    )
+    db_session.add(log)
+    db_session.commit()
+
+    assert len(conversation.messages) == 1
+    assert conversation.messages[0].content == "مرحبا"
