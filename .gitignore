@@ -3,3 +3,7 @@ __pycache__
 *.ogg
 *.wav
 .env
+temp/
+database/clinic.db
+telegram_chat_preview_live.txt
+.pytest_cache/

@@ -5,7 +5,6 @@ from uuid import uuid4
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.orm import Session, joinedload
 from utils.datetime_utils import utcnow
-from utils.datetime_utils import utcnow
 from .models import (
     Patient,
     Doctor,

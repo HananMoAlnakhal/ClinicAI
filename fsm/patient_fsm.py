@@ -100,14 +100,13 @@ def _looks_like_slot_list_request(norm: str) -> bool:
 
 
 def _looks_like_decline(norm: str) -> bool:
-    """Patient wants to back out — «ما بدي اشي»، «لا شكراً»."""
-    if not norm:
+    """Patient wants to back out — «ما بدي اشي»، «لا شكراً» (not explicit cancel buttons)."""
+    if not norm or _matches_any_token(norm, CANCEL_WORDS):
         return False
-    if _matches_any_token(norm, CANCEL_WORDS):
-        return True
     decline = (
-        "ما بدي", "مش بدي", "ما بده", "لا بدي", "لا شكر", "مش حاب", "ما بدي اشي",
-        "ما بدي شي", "ما بدي اي", "مو بدي", "مش عايز", "بطل", "خلص", "سكر",
+        "ما بدي", "ما اريد", "مش بدي", "مش اريد", "ما بده", "لا بدي", "لا اريد",
+        "لا شكر", "مش حاب", "ما بدي اشي", "ما بدي شي", "ما بدي اي", "ما اريد شي",
+        "مو بدي", "مش عايز", "بطل", "خلص", "سكر",
         "مش interested", "no thanks",
     )
     return any(p in norm for p in decline)
@@ -641,6 +640,10 @@ class PatientFSM:
         norm = normalize(text)
         await self._reload_slot_options_if_needed()
 
+        if _matches_any_token(norm, CANCEL_WORDS):
+            self.state = State.CANCELLED
+            return self._reply("تم الإلغاء. إذا احتجت أي شيء، أنا هون. 👋", UIAction.NONE)
+
         if _looks_like_decline(norm):
             self.state = State.CANCELLED
             return self._reply("تمام، ما في مشكلة — ألغيت الحجز. إذا احتجت شي لاحقاً أنا هون. 👋", UIAction.NONE)
@@ -731,11 +734,6 @@ class PatientFSM:
                 extra = f"\n\n(اخترت خيار {pick + 1} من {len(self.slot_options)})"
                 reply, action, payload = self._format_confirm_message()
                 return self._reply(reply + extra, action, payload)
-
-
-        if _matches_any_token(norm, CANCEL_WORDS):
-            self.state = State.CANCELLED
-            return self._reply("تم الإلغاء. إذا احتجت أي شيء، أنا هون. 👋", UIAction.NONE)
 
         return await self._confirm_natural_reply(text)
 
