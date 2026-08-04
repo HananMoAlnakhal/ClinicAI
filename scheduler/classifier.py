@@ -36,8 +36,8 @@ ROUTING_RULES: list[tuple[str, str]] = [
     # ── ORTHOPEDICS ─ musculoskeletal (fixed bare "وجع/الم" patterns) ──
     (
         r"كسر|التواء|عظام|مفاصل|"
-        r"(الم|وجع)\s*(?:ظهر|رقبه|ركبه|مفصل|كتف|عضله|ورك|ساق|طرف|ذراع|يد|رجل)|"
-        r"الركبه|الورك|الكتف|"
+        r"(الم|وجع)(?:\s*في)?\s*(?:ال)?(?:ظهر|رقبه|ركبه|مفصل|كتف|عضله|ورك|ساق|طرف|ذراع|يد|رجل)|"
+        r"الركبه|الورك|الكتف|الساق|الظهر|"
         r"عمود\s*فقري|وتر|وقعه|سقوط|"
         r"لا.*يستطيع.*مشي|لا.*استطيع.*الحركه|"
         r"الم.*مزمن.*(ظهر|رقبه|عظام)|"
@@ -283,6 +283,18 @@ def classify_specialty(text: str) -> dict:
     }
 
 
+def auto_resolve_specialty(result: dict) -> dict:
+    """Pick a clinic automatically — never leave booking blocked on patient specialty choice."""
+    if result.get("method") != "default":
+        return result
+    return {
+        "specialty": "general_practice",
+        "specialty_ar": SPECIALTY_NAMES_AR["general_practice"],
+        "method": "auto_fallback",
+        "confidence": result.get("confidence", 0.4),
+    }
+
+
 async def classify_with_gemini_fallback(text: str, gemini_client) -> dict:
     """
     Try rules first. If unresolved, ask Gemini and validate response.
@@ -315,4 +327,4 @@ async def classify_with_gemini_fallback(text: str, gemini_client) -> dict:
         except Exception as exc:
             logger.exception("Gemini fallback failed: %s", exc)
 
-    return result
+    return auto_resolve_specialty(result)

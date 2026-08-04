@@ -66,7 +66,7 @@ def specialty_keyboard() -> ReplyKeyboardMarkup:
     """Shown when classifier confidence is low — keys match scheduler.classifier.SPECIALTY_NAMES_AR."""
     rows = [
         # ["🫀 قلب وأوعية", "🧠 أعصاب"],
-        ["🫃 جهاز هضمي ", "🧠 أعصاب"],
+        ["🫃 جهاز هضمي", "🧠 أعصاب"],
         ["🦴 عظام ومفاصل", "🌸 نساء وتوليد"],
         # ["👶 أطفال", "🦷 أسنان"],
         # ["👁️ عيون", "🧴 جلدية"],

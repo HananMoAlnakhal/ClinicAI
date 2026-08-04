@@ -169,6 +169,47 @@ def test_confirm_cancel_does_not_cancel_db_appointment(patient_e2e_db, clear_pat
     assert db.scalar(select(Appointment).where(Appointment.appt_id == "appt-existing-e2e")).status == "confirmed"
 
 
+@patch("scheduler.classifier.classify_specialty", side_effect=lambda *a, **k: {
+    "specialty": "general_practice",
+    "specialty_ar": "الطب العام",
+    "method": "rule",
+    "confidence": 0.95,
+})
+@patch.object(gemini, "_available", False)
+@patch("bot.handlers.patient.TTS_ENABLED", False)
+def test_natural_language_cancel_after_finalize(_classify, patient_e2e_db):
+    """«أريد الغاء الموعد» must cancel a confirmed DB appointment when FSM is FINALIZED."""
+    db = patient_e2e_db["db"]
+    slot = patient_e2e_db["slot"]
+
+    update, _ = make_start_update(PATIENT_ID)
+    with use_test_db(db):
+        run_async(patient_handler.handle_start(update, make_context()))
+
+    _send_patient(db, "ليلى")
+    _send_patient(db, "صداع")
+    _send_patient(db, "🟢 روتيني / عادي")
+    _send_patient(db, "بكرا")
+    _send_patient(db, "✅ تأكيد الحجز")
+
+    with use_test_db(db):
+        fsm = patient_handler._get_fsm(PATIENT_ID)
+    assert fsm.state == State.FINALIZED
+
+    msg = _send_patient(db, "اريد الغاء الموعد")
+    assert "تم إلغاء آخر موعد" in last_reply_text(msg)
+
+    appt = db.scalar(
+        select(Appointment)
+        .join(Patient, Appointment.patient_id == Patient.patient_id)
+        .where(Patient.telegram_id == PATIENT_ID)
+        .order_by(Appointment.created_at.desc())
+    )
+    assert appt is not None
+    assert appt.status == "cancelled"
+    assert db.get(Slot, slot.slot_id).status == "available"
+
+
 @patch.object(gemini, "_available", False)
 @patch("bot.handlers.patient.TTS_ENABLED", False)
 def test_session_persists_across_handler_reload(patient_e2e_db):
@@ -178,16 +219,16 @@ def test_session_persists_across_handler_reload(patient_e2e_db):
     with use_test_db(db):
         run_async(patient_handler.handle_start(update, make_context()))
     _send_patient(db, "سارة محمود")
-    _send_patient(db, "سارة محمود")
+    _send_patient(db, "عندي صداع")
 
     with use_test_db(db):
         row = crud.get_fsm_session(db, PATIENT_ID, role="patient")
     assert row is not None
-    assert row.state == State.COLLECT_COMPLAINT.name
+    assert row.state == State.COLLECT_URGENCY.name
 
     with use_test_db(db):
         reloaded = patient_handler._get_fsm(PATIENT_ID)
-    assert reloaded.state == State.COLLECT_COMPLAINT
+    assert reloaded.state == State.COLLECT_URGENCY
     assert reloaded.data.get("name") == "سارة محمود"
 
 

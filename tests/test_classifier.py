@@ -12,6 +12,8 @@ from scheduler.classifier import (
 SPECIALTY_RULE_CASES = [
     ("عندي صداع شديد جداً مع تنميل بإيدي", "neurology"),
     ("صار عندي كسر بذراعي بعد ما وقعت", "orthopedics"),
+    ("الم في الساق", "orthopedics"),
+    ("وجع في الساق", "orthopedics"),
     ("أنا بالشهر السابع من الحمل وصار عندي نزيف رحمي", "gynecology"),
     ("طلع عندي طفح جلدي على إيدي", "dermatology"),
     ("عندي مغص وإسهال شديد من الصبح", "gastroenterology"),
@@ -66,11 +68,11 @@ async def test_gemini_not_called_when_rule_already_matched():
 
 
 @pytest.mark.asyncio
-async def test_gemini_returns_unknown_key_falls_back_to_default():
+async def test_gemini_returns_unknown_key_falls_back_to_auto():
     mock_client = AsyncMock()
     mock_client.ask.return_value = "radiology"
     result = await classify_with_gemini_fallback(_VAGUE, mock_client)
-    assert result["method"] == "default"
+    assert result["method"] == "auto_fallback"
     assert result["specialty"] == "general_practice"
 
 
@@ -97,7 +99,7 @@ async def test_gemini_empty_response_handled_gracefully():
     mock_client = AsyncMock()
     mock_client.ask.return_value = ""
     result = await classify_with_gemini_fallback(_VAGUE, mock_client)
-    assert result["method"] == "default"
+    assert result["method"] == "auto_fallback"
 
 
 @pytest.mark.asyncio
@@ -105,4 +107,4 @@ async def test_gemini_raises_exception_handled_gracefully():
     mock_client = AsyncMock()
     mock_client.ask.side_effect = TimeoutError("network down")
     result = await classify_with_gemini_fallback(_VAGUE, mock_client)
-    assert result["method"] == "default"
+    assert result["method"] == "auto_fallback"

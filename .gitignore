@@ -3,4 +3,3 @@ __pycache__
 *.ogg
 *.wav
 .env
-.env.backup

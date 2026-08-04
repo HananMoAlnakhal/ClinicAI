@@ -11,6 +11,14 @@ from tests.helpers import make_test_engine, make_test_session, seed_doctor, seed
 from utils.datetime_utils import utcnow
 
 
+@pytest.fixture(autouse=True)
+def disable_live_gemini(monkeypatch):
+    """Unit tests must not call the real Gemini API when .env has a key."""
+    from nlp import gemini_client
+
+    monkeypatch.setattr(gemini_client.gemini, "_available", False)
+
+
 @pytest.fixture
 def db_engine():
     engine = make_test_engine()
