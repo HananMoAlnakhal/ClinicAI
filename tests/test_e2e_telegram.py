@@ -162,7 +162,7 @@ def test_confirm_cancel_does_not_cancel_db_appointment(patient_e2e_db, clear_pat
         msg = _send_patient(db, "❌ إلغاء")
         mock_cancel.assert_not_called()
 
-    assert "تم الإلغاء" in last_reply_text(msg)
+        assert "تم إلغاء طلب الحجز الحالي" in last_reply_text(msg)
     with use_test_db(db):
         reloaded = patient_handler._get_fsm(PATIENT_ID)
     assert reloaded.state == State.CANCELLED
@@ -197,7 +197,7 @@ def test_natural_language_cancel_after_finalize(_classify, patient_e2e_db):
     assert fsm.state == State.FINALIZED
 
     msg = _send_patient(db, "اريد الغاء الموعد")
-    assert "تم إلغاء آخر موعد" in last_reply_text(msg)
+    assert "تم إلغاء موعدك وإرجاع خيار الحجز كمتاح" in last_reply_text(msg)
 
     appt = db.scalar(
         select(Appointment)

@@ -150,7 +150,7 @@ class GeminiClient:
             ],
             "max_tokens": max_tokens,
         }
-        with httpx.Client(timeout=60.0) as http:
+        with httpx.Client(timeout=15.0, trust_env=False, proxy=None) as http:
             response = http.post(url, headers=headers, json=payload)
             if response.status_code == 429:
                 raise Exception(f"429 rate limit: {response.text[:200]}")
@@ -259,6 +259,8 @@ class GeminiClient:
             f"سياق: {current_question}\n\n"
             "اكتب رداً قصيراً بالفلسطيني (جملة أو جملتين فقط). "
             "جاوب على سؤاله بشكل طبيعي وودود. "
+            "إذا سأل عن وظيفتك: أنت مساعد حجز مواعيد العيادة فقط. "
+            "إذا سأل عن الإدارة: لوحة العيادة للموظفين وليست من البوت. "
             "لا تذكر قائمة أزرار ولا تكرر «اكتب ✅» أو «اكتب ❌». "
             "لا تكرر بياناته ولا تذكر تفاصيل تقنية."
         )
@@ -302,6 +304,40 @@ class GeminiClient:
         if cleaned.upper() == "NONE" or not cleaned:
             return ""
         return cleaned
+
+    async def classify_and_reply(self, complaint_text: str, patient_name: str = "") -> dict:
+        """Single LLM call to classify specialty and generate a warm Palestinian Arabic reply simultaneously."""
+        if not self.is_ready:
+            return {}
+
+        prompt = (
+            f"المريض ({patient_name or 'عزيزي المريض'}) يقول: '{complaint_text}'\n\n"
+            "المطلوب القيام بالمهمتين التاليتين وتقديم النتيجة كـ JSON فقط:\n"
+            "1. اختر التخصص الأنسب فقط من المفاتيح التالية:\n"
+            "   gastroenterology, neurology, orthopedics, gynecology, chronic_diseases, dermatology, general_practice, elderly\n"
+            "2. اكتب رداً فلسطينياً عامياً ودوداً وقصيراً جداً (جملة واحدة) يؤكد فهم الشكوى وتوجيهه للعيادة.\n\n"
+            "صيغة الإجابة المطلوب إرجاعها (JSON فقط بدون أي أسطر إضافية أو ملاحق):\n"
+            '{"specialty": "<المفتاح>", "reply": "<الرد العربي العامي>"}'
+        )
+
+        raw = await self.ask(prompt, max_tokens=150)
+        if not raw:
+            return {}
+
+        import json
+        try:
+            # Clean JSON markers if returned
+            clean_raw = raw.strip()
+            if clean_raw.startswith("```json"):
+                clean_raw = clean_raw[7:]
+            if clean_raw.startswith("```"):
+                clean_raw = clean_raw[3:]
+            if clean_raw.endswith("```"):
+                clean_raw = clean_raw[:-3]
+            return json.loads(clean_raw.strip())
+        except Exception as exc:
+            logger.warning("Failed to parse JSON from classify_and_reply: %s (Raw: %s)", exc, raw)
+            return {}
 
     async def generate_voice_response(self, text: str) -> str:
         if not self.is_ready:

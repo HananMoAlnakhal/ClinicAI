@@ -14,7 +14,7 @@ from config import TTS_ENABLED, TTS_RESPONSE_MODE
 from database import crud
 from database.db import get_db
 from fsm.fsm_result import keyboard_for_action
-from fsm.patient_fsm import PatientFSM, State
+from fsm.patient_fsm import PatientFSM, State, FIELD_QUESTIONS_AR
 from nlp.normalizer import normalize
 from voice.stt import transcribe_voice
 from voice.tts import text_to_ogg
@@ -164,10 +164,17 @@ def _should_send_voice(incoming_was_voice: bool) -> bool:
     return TTS_RESPONSE_MODE == "auto" and incoming_was_voice
 
 
-def _begin_booking(user_id: int) -> None:
+def _begin_booking(user_id: int) -> tuple[str, object | None]:
     fsm = _get_fsm(user_id, reset=True)
-    fsm.state = State.COLLECT_NAME
+    fsm._preload_patient_name()
+    if fsm.data.get("name"):
+        fsm.state = State.COLLECT_COMPLAINT
+        reply = f"📅 تمام! أهلاً {fsm.data['name']}، خلينا نبدأ حجز جديد.\n" + FIELD_QUESTIONS_AR["complaint"]
+    else:
+        fsm.state = State.COLLECT_NAME
+        reply = "📅 تمام، خلينا نبدأ حجز جديد. ما اسمك الكريم؟ 😊"
     _persist_fsm(fsm)
+    return reply, None
 
 
 async def _send_patient_reply(
@@ -184,11 +191,12 @@ async def _send_patient_reply(
             break
         except (TimedOut, NetworkError) as exc:
             last_exc = exc
-            logger.warning("Telegram send timeout (attempt %s/3): %s", attempt + 1, exc)
+            logger.warning("Telegram send failed (attempt %s/3): %s", attempt + 1, exc)
             if attempt < 2:
                 await asyncio.sleep(1.5 * (attempt + 1))
     if last_exc is not None:
-        raise last_exc
+        logger.error("Could not deliver Telegram reply after 3 attempts: %s", last_exc)
+        return False
     if not _should_send_voice(incoming_was_voice):
         return False
 
@@ -214,8 +222,8 @@ def _log_outbound(user_id: int, reply: str, voice_sent: bool = False) -> None:
 def _menu_response(user_id: int, text: str):
     """Return (reply, keyboard) for main-menu commands, or None."""
     if _is_repeat_request(text):
-        _begin_booking(user_id)
-        return "📅 تمام، خلينا نبدأ حجز جديد. ما اسمك الكريم؟", None
+        reply, kb = _begin_booking(user_id)
+        return reply, kb
 
     if _is_inquiry_request(text):
         with get_db() as db:
@@ -228,7 +236,7 @@ def _menu_response(user_id: int, text: str):
             appt = crud.cancel_latest_patient_appointment(db, user_id)
         _get_fsm(user_id, reset=True)
         reply = (
-            "تم إلغاء آخر موعد مؤكد/منتظر وإرجاع الـ slot كمتاح إذا كان محجوزاً. ✅"
+            "تم إلغاء موعدك وإرجاع خيار الحجز كمتاح في النظام. ✅"
             if appt
             else "لا يوجد موعد مؤكد أو منتظر لإلغائه حالياً."
         )
@@ -246,13 +254,6 @@ def _menu_response(user_id: int, text: str):
 async def _handle_fsm_turn(user_id: int, text: str) -> tuple[str, object | None]:
     fsm = _get_fsm(user_id)
     reply, action, _payload = await fsm.handle(text)
-
-    if fsm.state not in (State.CONFIRM, State.OFFER_GP_FALLBACK):
-        if fsm.rule_reply_seems_inadequate(text, reply):
-            fallback = await fsm.maybe_gemini_fallback(text)
-            if fallback:
-                reply = fallback
-
     _persist_fsm(fsm)
     return reply, keyboard_for_action(action)
 
@@ -264,13 +265,19 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _get_fsm(user.id, reset=True)
     fsm = _get_fsm(user.id)
-    fsm.state = State.COLLECT_NAME
+    fsm._preload_patient_name()
+    if fsm.data.get("name"):
+        fsm.state = State.COLLECT_COMPLAINT
+        reply = f"👋 أهلاً {fsm.data['name']}! أنا مساعد الحجز في العيادة. 🩺\n" + FIELD_QUESTIONS_AR["complaint"]
+    else:
+        fsm.state = State.COLLECT_NAME
+        reply = "👋 أهلاً وسهلاً بك في العيادة! 🏥\nأنا مساعد الحجز، " + FIELD_QUESTIONS_AR["name"]
     _persist_fsm(fsm)
+
     with get_db() as db:
         crud.get_or_create_conversation(db, user.id, user.username, user.first_name, user.last_name)
         crud.log_message(db, user.id, "inbound", "command", "/start")
 
-    reply = "👋 مرحباً! أنا مساعد الحجز. اختاري/اختر من القائمة أو أرسل اسمك وسبب زيارتك لأساعدك بالحجز."
     voice_sent = await _send_patient_reply(update.message, reply, main_menu_keyboard())
     _log_outbound(user.id, reply, voice_sent)
 

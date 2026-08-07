@@ -283,6 +283,10 @@ def classify_specialty(text: str) -> dict:
     }
 
 
+def is_confident(result: dict) -> bool:
+    return result.get("confidence", 0) >= 0.8
+
+
 def auto_resolve_specialty(result: dict) -> dict:
     """Pick a clinic automatically — never leave booking blocked on patient specialty choice."""
     if result.get("method") != "default":
@@ -291,39 +295,50 @@ def auto_resolve_specialty(result: dict) -> dict:
         "specialty": "general_practice",
         "specialty_ar": SPECIALTY_NAMES_AR["general_practice"],
         "method": "auto_fallback",
-        "confidence": result.get("confidence", 0.4),
+        "confidence": result.get("confidence", 0.5),
     }
 
 
-async def classify_with_gemini_fallback(text: str, gemini_client) -> dict:
+async def classify_with_gemini_fallback(text: str, gemini_client, patient_name: str = "") -> dict:
     """
-    Try rules first. If unresolved, ask Gemini and validate response.
-    Use this for ambiguous or multi-complaint messages.
+    Try rules first. If unresolved, ask Gemini to classify AND draft a friendly reply in a single request.
     """
     result = classify_specialty(text)
 
     if result["method"] == "default":
         normalized_text = normalize(text or "")
-        prompt = (
-            f"المريض يقول: '{normalized_text}'\n\n"
-            f"اختر التخصص الأنسب من هذه المفاتيح فقط:\n"
-            + "\n".join(f"- {k}: {v}" for k, v in SPECIALTY_NAMES_AR.items())
-            + "\n\nأجب بمفتاح واحد فقط من القائمة بالإنجليزية (مثل: neurology). بدون أي نص إضافي."
-        )
+        specialty_key = None
+        custom_reply = None
+
         try:
-            gemini_result = await gemini_client.ask(prompt, max_tokens=20)
-            if not (gemini_result or "").strip():
-                raise ValueError("Empty response from Gemini")
-            specialty_key = _parse_gemini_specialty_key(gemini_result)
-            if specialty_key:
+            if hasattr(gemini_client, "classify_and_reply"):
+                res = await gemini_client.classify_and_reply(normalized_text, patient_name)
+                if isinstance(res, dict):
+                    specialty_key = res.get("specialty")
+                    custom_reply = res.get("reply")
+
+            if not specialty_key and hasattr(gemini_client, "ask"):
+                prompt = (
+                    f"المريض يقول: '{normalized_text}'\n\n"
+                    f"اختر التخصص الأنسب من هذه المفاتيح فقط:\n"
+                    + "\n".join(f"- {k}: {v}" for k, v in SPECIALTY_NAMES_AR.items())
+                    + "\n\nأجب بمفتاح واحد فقط من القائمة بالإنجليزية (مثل: neurology). بدون أي نص إضافي."
+                )
+                gemini_result = await gemini_client.ask(prompt, max_tokens=20)
+                if gemini_result and (gemini_result or "").strip():
+                    specialty_key = _parse_gemini_specialty_key(gemini_result)
+
+            if specialty_key and specialty_key in SPECIALTY_NAMES_AR:
                 result = {
                     "specialty":    specialty_key,
                     "specialty_ar": SPECIALTY_NAMES_AR[specialty_key],
                     "method":       "gemini",
                     "confidence":   0.85,
                 }
+                if custom_reply:
+                    result["custom_reply"] = custom_reply
             else:
-                logger.warning("Gemini returned unknown specialty key: %s", gemini_result)
+                logger.warning("Gemini returned unknown or invalid specialty key: %s", specialty_key)
         except Exception as exc:
             logger.exception("Gemini fallback failed: %s", exc)
 

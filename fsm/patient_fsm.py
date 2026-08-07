@@ -62,16 +62,17 @@ class State(Enum):
     FINALIZED = auto()
     WAITLISTED = auto()
     CANCELLED = auto()
+    UNRECOGNIZED = auto()
 
 
 # Required fields — the checklist before touching scheduling.
 REQUIRED_FIELDS: list[str] = ["name", "complaint", "urgency_score", "time_pref"]
 
 FIELD_QUESTIONS_AR: dict[str, str] = {
-    "name": "ما اسمك الكريم؟",
-    "complaint": "شو الشكوى أو سبب الزيارة؟",
-    "urgency_score": "هل الموضوع عاجل، متوسط، أو روتيني؟",
-    "time_pref": "متى تحب الموعد؟ (اليوم، بكرا، الأسبوع الجاي...)",
+    "name": "ما اسمك الكريم؟ 😊",
+    "complaint": "سلامتك! شو الأعراض أو سبب الزيارة؟ 🩺",
+    "urgency_score": "كيف شايف حالة المريض؟ (عاجل 🔴 / متوسط 🟡 / روتيني 🟢)",
+    "time_pref": "متى يناسبك الموعد؟ (اليوم، بكرا، الأسبوع الجاي...)",
 }
 
 CONFIRM_WORDS = {
@@ -157,11 +158,12 @@ def _is_low_signal_input(text: str) -> bool:
 
 
 def _is_bot_meta_question(text: str) -> bool:
-    """«ماذا تريد» / «شو بدك» — not a name or complaint."""
+    """«ماذا تريد» / «شو بدك» / «شو وظيفتك» — not a name or complaint."""
     norm = normalize(text or "").strip()
     phrases = (
         "ماذا تريد", "ماذا تبغ", "شو تريد", "شو بدك", "شو بتحب",
-        "what do you want", "what do you need",
+        "شو وظيف", "شو شغل", "شو بتعمل", "شو دورك", "مين انت", "من انت",
+        "what do you want", "what do you need", "what are you", "who are you",
     )
     return any(p in norm for p in phrases)
 
@@ -201,6 +203,39 @@ SPECIALTY_LABEL_TO_KEY = {
 }
 
 
+def _is_cancel_intent(text: str) -> bool:
+    norm = normalize(text or "").lower().strip()
+    if not norm:
+        return False
+    cancel_tokens = ("الغاء", "إلغاء", "الغي", "إلغي", "الغيلي", "كنسل", "cancel")
+    if any(token in norm for token in cancel_tokens):
+        return True
+    return any(phrase in norm for phrase in ("بديش احجز", "مش حاب احجز", "لا اريد الحجز", "بدي الغي"))
+
+
+def _clean_extracted_name(text: str) -> str | None:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return None
+    if PatientFSM._is_greeting_only(raw) or GeminiClient.looks_like_question(raw) or GeminiClient.looks_off_topic(raw):
+        return None
+    norm = normalize(raw)
+    if any(w in norm for w in ["موعد", "حجز", "عاجل", "روتيني", "اليوم", "بكرا", "شكوى", "الم", "وجع", "مرض"]):
+        return None
+    cleaned = raw
+    prefixes = [
+        "أنا اسمي", "انا اسمي", "اسمي", "أنا", "انا", "معك", "معاكم",
+        "مرحبا أنا", "مرحبا انا", "أهلاً أنا", "اهلا انا", "حجز باسم", "اسم"
+    ]
+    for prefix in prefixes:
+        if cleaned.lower().startswith(prefix + " ") or cleaned.startswith(prefix + " "):
+            cleaned = cleaned[len(prefix):].strip()
+    words = cleaned.split()
+    if 1 <= len(words) <= 4 and len(cleaned) <= 40 and not any(ch.isdigit() for ch in cleaned):
+        return cleaned
+    return None
+
+
 @dataclass
 class PatientFSM:
     user_id: int
@@ -221,11 +256,18 @@ class PatientFSM:
         text = text or ""
         norm = normalize(text)
 
+        # Global Cancel Check
+        if _is_cancel_intent(text):
+            cancel_db = self.state in (State.GREETING, State.FINALIZED, State.WAITLISTED, State.CANCELLED)
+            return await self._execute_cancellation(cancel_db=cancel_db)
+
         if self.state in (State.FINALIZED, State.CANCELLED, State.WAITLISTED):
             if self._is_new_booking_request(text):
                 self._reset()
             else:
-                return self._reply("تم إنهاء الطلب السابق. إذا بدك حجز جديد اكتب: حجز موعد جديد 📅", UIAction.SHOW_MAIN_MENU)
+                terminal = self._handle_terminal_state(text)
+                if terminal is not None:
+                    return terminal
 
         if _is_name_dispute(text):
             self.data.pop("name", None)
@@ -249,51 +291,39 @@ class PatientFSM:
         if self.state == State.CLASSIFY:
             return await self._classify_and_schedule()
 
-        if self.state == State.GREETING:
+        if self.state in (State.GREETING, State.COLLECT_NAME):
+            if _is_bot_meta_question(text):
+                self.data.pop("name", None)
+                self.state = State.COLLECT_NAME
+                return self._reply(
+                    "أنا مساعد حجز المواعيد في العيادة 🏥. بساعدك تحجز موعد. شو اسمك الكريم؟ 😊",
+                    None,
+                )
+
             self._preload_patient_name()
-            if self.data.get("name") and not self._is_greeting_only(text) and not self._looks_like_name(text):
-                if _is_bot_meta_question(text) or GeminiClient.looks_like_question(text):
-                    stored = self.data.pop("name", None)
-                    self.state = State.COLLECT_NAME
-                    return self._reply(
-                        "أنا مساعد حجز المواعيد في العيادة. "
-                        + (f"سجلت اسمك سابقاً «{stored}» — إذا غلط اكتب اسمك الصحيح.\n" if stored else "")
-                        + FIELD_QUESTIONS_AR["name"],
-                        None,
-                    )
+            if self.data.get("name") and self._is_greeting_only(self.data["name"]):
+                self.data.pop("name", None)
+
+            # If patient name is known (preloaded or in data), do NOT ask for name!
             if self.data.get("name"):
                 self.state = State.COLLECT_COMPLAINT
                 return self._reply(
                     f"أهلاً {self.data['name']}! 👋\n" + FIELD_QUESTIONS_AR["complaint"],
                     None,
                 )
-            if self._looks_like_name(text):
-                self.data["name"] = text.strip()
+
+            cleaned_name = _clean_extracted_name(text) or (text.strip() if self._looks_like_name(text) else None)
+            if cleaned_name:
+                self.data["name"] = cleaned_name
                 self.state = State.COLLECT_COMPLAINT
                 return self._reply(
-                    f"أهلاً {self.data['name']}! 😊\n" + FIELD_QUESTIONS_AR["complaint"],
+                    f"أهلاً {cleaned_name}! 😊\n" + FIELD_QUESTIONS_AR["complaint"],
                     None,
                 )
+
             self.state = State.COLLECT_NAME
             if self._is_greeting_only(text):
                 return self._reply(self._greeting_and_ask_name(), None)
-            return self._reply(FIELD_QUESTIONS_AR["name"], None)
-
-        if self.state == State.COLLECT_NAME:
-            if self._is_greeting_only(text):
-                return self._reply(self._greeting_and_ask_name(), None)
-
-            if self.data.get("name") and self._is_greeting_only(self.data["name"]):
-                self.data.pop("name", None)
-
-            if self.data.get("name"):
-                self.state = State.COLLECT_COMPLAINT
-                return self._reply(f"أهلاً {self.data['name']}! 😊\n" + FIELD_QUESTIONS_AR["complaint"], None)
-
-            if self._looks_like_name(text):
-                self.data["name"] = text.strip()
-                self.state = State.COLLECT_COMPLAINT
-                return self._reply(f"أهلاً {self.data['name']}! 😊\n" + FIELD_QUESTIONS_AR["complaint"], None)
 
             raw = text.strip()
             if raw and any(ch.isdigit() for ch in raw):
@@ -305,30 +335,23 @@ class PatientFSM:
             return self._reply(FIELD_QUESTIONS_AR["name"], None)
 
         if self.state == State.COLLECT_COMPLAINT:
-            unsupported = self.services.detect_unsupported(text)
+            raw_text = text.strip()
+            if not raw_text:
+                return self._reply("سلامتك! شو الأعراض أو سبب الزيارة؟ 🩺")
+
+            unsupported = self.services.detect_unsupported(raw_text)
             if unsupported:
-                self._stash_complaint_for_unsupported(text)
+                self._stash_complaint_for_unsupported(raw_text)
                 self.data["unsupported_clinic_label"] = unsupported
                 self.state = State.OFFER_GP_FALLBACK
                 return self._reply(self._gp_fallback_message(unsupported), UIAction.SHOW_CONFIRM)
 
-            if self.data.get("complaint"):
-                unsupported = detect_unsupported_specialty(self.data["complaint"].get("raw", ""))
-                if unsupported:
-                    self._stash_complaint_for_unsupported(text)
-                    self.data["unsupported_clinic_label"] = unsupported
-                    self.state = State.OFFER_GP_FALLBACK
-                    return self._reply(self._gp_fallback_message(unsupported), UIAction.SHOW_CONFIRM)
-
-                self.state = State.COLLECT_URGENCY
-                return self._reply(FIELD_QUESTIONS_AR["urgency_score"], UIAction.SHOW_URGENCY)
-
-            complaint = await self._extract_complaint_from_text(text)
+            complaint = await self._extract_complaint_from_text(raw_text)
             if complaint:
                 self.data["complaint"] = complaint
                 unsupported = self.services.detect_unsupported(complaint.get("raw", ""))
                 if unsupported:
-                    self._stash_complaint_for_unsupported(text)
+                    self._stash_complaint_for_unsupported(raw_text)
                     self.data["unsupported_clinic_label"] = unsupported
                     self.state = State.OFFER_GP_FALLBACK
                     return self._reply(self._gp_fallback_message(unsupported), UIAction.SHOW_CONFIRM)
@@ -336,35 +359,38 @@ class PatientFSM:
                 self.state = State.COLLECT_URGENCY
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], UIAction.SHOW_URGENCY)
 
-            if text.strip():
+            # If user message is valid free text complaint
+            if len(raw_text) >= 2 and not self._is_greeting_only(raw_text):
                 self.data["complaint"] = {
-                    "raw": text.strip(),
+                    "raw": raw_text,
                     "category": "general",
                     "urgency_score": 0.3,
                     "specialty": "general_practice",
                 }
-                unsupported = self.services.detect_unsupported(text.strip())
-                if unsupported:
-                    self._stash_complaint_for_unsupported(text)
-                    self.data["unsupported_clinic_label"] = unsupported
-                    self.state = State.OFFER_GP_FALLBACK
-                    return self._reply(self._gp_fallback_message(unsupported), UIAction.SHOW_CONFIRM)
-
                 self.state = State.COLLECT_URGENCY
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], UIAction.SHOW_URGENCY)
 
-            return self._reply("ممكن تخبرني أكثر عن سبب زيارتك؟")
+            return self._reply("سلامتك! شو الأعراض أو سبب الزيارة؟ 🩺")
 
         if self.state == State.COLLECT_URGENCY:
             if not text.strip():
                 return self._reply(FIELD_QUESTIONS_AR["urgency_score"], UIAction.SHOW_URGENCY)
-            # Clear incidental NLP defaults; accept only explicit urgency in this message.
+
             self.data.pop("urgency_score", None)
             if self._absorb_urgency(norm, text):
                 self.state = State.COLLECT_TIME
                 return self._reply(FIELD_QUESTIONS_AR["time_pref"], UIAction.SHOW_TIME)
+
+            if gemini.is_ready:
+                extracted = await gemini.extract_missing_field(text, "urgency")
+                score = self._score_from_label(extracted)
+                if score is not None:
+                    self.data["urgency_score"] = score
+                    self.state = State.COLLECT_TIME
+                    return self._reply(FIELD_QUESTIONS_AR["time_pref"], UIAction.SHOW_TIME)
+
             return self._reply(
-                "ما فهمت مستوى الأولوية. اكتب عاجل/روتيني/متوسط أو اختار من الأزرار.",
+                "سلامتك! تحب الموعد يكون عاجل 🔴 ولا متوسط 🟡 ولا روتيني 🟢؟ الأولوية بتساعدنا نرتب المواعيد.",
                 UIAction.SHOW_URGENCY,
             )
 
@@ -378,14 +404,14 @@ class PatientFSM:
                     return await self._run_validate()
                 return await self._score_and_find_slot()
             if _matches_any_token(norm, CANCEL_WORDS):
-                self.state = State.CANCELLED
-                return self._reply("تم الإلغاء. إذا احتجت أي شيء، أنا هون. 👋", UIAction.NONE)
+                return await self._execute_cancellation()
             label = self.data.get("unsupported_clinic_label", "هذا التخصص")
             return self._reply(self._gp_fallback_message(label), UIAction.SHOW_CONFIRM)
 
         if self.state == State.COLLECT_TIME:
             if not text.strip():
                 return self._reply(FIELD_QUESTIONS_AR["time_pref"], UIAction.SHOW_TIME)
+
             mapped = self._parse_time_label(text)
             if not mapped and gemini.is_ready:
                 extracted = await gemini.extract_missing_field(text, "time_pref")
@@ -394,8 +420,9 @@ class PatientFSM:
             if mapped:
                 self.data["time_pref"] = mapped
                 return await self._run_validate()
+
             return self._reply(
-                "ما فهمت متى بدك الموعد. اكتب مثلاً: اليوم، بكرا، الأسبوع الجاي — أو اختار من الأزرار.",
+                "متى بتفضل الموعد؟ (مثلاً: اليوم، بكرا، أو خلال هذا الأسبوع) 😊",
                 UIAction.SHOW_TIME,
             )
 
@@ -414,7 +441,7 @@ class PatientFSM:
                     specialty_key = extracted
             if not specialty_key:
                 return self._reply(
-                    "ما فهمت التخصص. اكتب اسم التخصص أو اختار من الأزرار.",
+                    "ما فهمت التخصص. اختر التخصص الأقرب من الأزرار.",
                     UIAction.SHOW_SPECIALTY,
                 )
             self.data["specialty_hint"] = specialty_key
@@ -428,7 +455,24 @@ class PatientFSM:
         if self.state == State.FIND_SLOT:
             return await self._find_slot()
 
-        return self._reply("عفواً، ما فهمت. ممكن تعيد؟")
+        self.state = State.UNRECOGNIZED
+        return await self._handle_unrecognized(text)
+
+    async def _execute_cancellation(self, cancel_db: bool = True) -> tuple[str, UIAction, dict]:
+        """Cancel DB appointment if requested, free slot, and set state to CANCELLED."""
+        if cancel_db:
+            from database.db import get_db
+            from database import crud
+
+            with get_db() as db:
+                crud.cancel_latest_patient_appointment(db, self.user_id)
+
+            reply = "تم إلغاء آخر موعد لك وإرجاع خيار الحجز كمتاح في النظام. ✅\nإذا أردت حجز موعد جديد في أي وقت، اكتب (حجز موعد جديد) وأنا بخدمتك دائماً. 👋"
+        else:
+            reply = "تم إلغاء طلب الحجز الحالي. ✅\nإذا أردت حجز موعد جديد في أي وقت، اكتب (حجز موعد جديد) وأنا بخدمتك دائماً. 👋"
+
+        self.state = State.CANCELLED
+        return self._reply(reply, UIAction.SHOW_MAIN_MENU)
 
     async def handle_callback(self, data: str) -> tuple[str, UIAction, dict]:
         # Kept for compatibility if inline keyboards are added later.
@@ -482,22 +526,6 @@ class PatientFSM:
             if k == "complaint" and self.state not in (State.GREETING, State.COLLECT_NAME, State.COLLECT_COMPLAINT):
                 continue
             self.data[k] = v
-
-        if text.strip() and self._should_try_ai_extraction():
-            await self._try_ai_extraction(text)
-
-    def _should_try_ai_extraction(self) -> bool:
-        if not gemini.is_ready:
-            return False
-        if self.state == State.COLLECT_NAME and not self.data.get("name"):
-            return True
-        if self.state == State.COLLECT_COMPLAINT and not self.data.get("complaint"):
-            return True
-        if self.state == State.COLLECT_URGENCY and self.data.get("urgency_score") is None:
-            return True
-        if self.state == State.COLLECT_TIME and not self.data.get("time_pref"):
-            return True
-        return False
 
     async def _extract_complaint_from_text(self, original_text: str) -> dict | None:
         complaint = extract_patient_fields(original_text).get("complaint")
@@ -576,8 +604,9 @@ class PatientFSM:
             return self._reply(self._gp_fallback_message(unsupported), UIAction.SHOW_CONFIRM)
 
         gemini_client = self.services.gemini
+        patient_name = str(self.data.get("name") or "")
         if gemini_client is not None and getattr(gemini_client, "is_ready", False):
-            spec_result = await self.services.classify_with_fallback(norm_complaint, gemini_client)
+            spec_result = await classify_with_gemini_fallback(norm_complaint, gemini_client, patient_name)
         else:
             spec_result = auto_resolve_specialty(self.services.classify(norm_complaint))
 
@@ -591,6 +620,8 @@ class PatientFSM:
         self.data["specialty_ar"] = spec_result["specialty_ar"]
         self.data["specialty_method"] = spec_result.get("method")
         self.data["specialty_confidence"] = spec_result.get("confidence")
+        if spec_result.get("custom_reply"):
+            self.data["custom_reply"] = spec_result["custom_reply"]
 
         return await self._score_and_find_slot()
 
@@ -740,42 +771,6 @@ class PatientFSM:
     def _confirm_nudge(self) -> str:
         return "لسا معك بالحجز 🙂 بدك تأكيد الموعد، تشوف وقت ثاني، أو نلغي؟"
 
-    def _confirm_explain_question(self, text: str) -> str:
-        """Rule-based natural answers at CONFIRM — no emoji instruction spam."""
-        norm = normalize(text or "")
-        if any(w in norm for w in ("ليش", "لماذا", "ليه", "why")):
-            when = "—"
-            if self.slot and self.slot.get("slot_datetime"):
-                when = self.slot["slot_datetime"].strftime("%A %d/%m — %H:%M")
-            return (
-                f"اقترحنا موعد {when}. قبل ما نثبته بالنظام بدنا موافقتك — "
-                "إذا مناسب قولي «تمام» أو اضغط ✅، وإذا لا في مش مانع."
-            )
-        if any(w in norm for w in ("كيف", "شو", "ماذا", "ايش")):
-            return (
-                "هاي آخر خطوة: إما تأكيد الموعد المعروض، أو تختار وقت ثاني، أو إلغاء. "
-                "استخدم الأزرار تحت إذا أسهل عليك."
-            )
-        return self._confirm_nudge()
-
-    async def _confirm_natural_reply(self, text: str) -> tuple[str, UIAction, dict]:
-        """Gemini fallback only when rules did not already answer."""
-        if gemini.is_ready:
-            answer = await gemini.answer_in_booking_context(
-                text,
-                self.state.name,
-                {
-                    **self.data,
-                    "slot": self.slot,
-                    "slot_options": self.slot_options,
-                    "slot_count": len(self.slot_options),
-                },
-                self._confirm_gemini_hint(),
-            )
-            if answer and "✅ لتأكيد" not in answer:
-                return self._reply(answer.strip(), UIAction.SHOW_CONFIRM)
-        return self._reply(self._confirm_nudge(), UIAction.SHOW_CONFIRM)
-
     def _confirm_gemini_hint(self) -> str:
         when = "—"
         if self.slot and self.slot.get("slot_datetime"):
@@ -796,7 +791,6 @@ class PatientFSM:
         if not self.priority:
             return
         from database.db import get_db
-
         with get_db() as db:
             slots = self.services.find_slots(
                 db,
@@ -810,6 +804,44 @@ class PatientFSM:
                 self.slot_options = [self._slot_to_dict(s) for s in slots]
                 self.slot_index = min(self.slot_index, len(self.slot_options) - 1)
                 self.slot = self.slot_options[self.slot_index]
+
+
+    def _confirm_explain_question(self, text: str) -> str:
+        """Rule-based natural answers at CONFIRM — no emoji instruction spam."""
+        norm = normalize(text or "")
+        if any(w in norm for w in ("ليش", "لماذا", "ليه", "why")):
+            when = "—"
+            if self.slot and self.slot.get("slot_datetime"):
+                when = self.slot["slot_datetime"].strftime("%A %d/%m — %H:%M")
+            return (
+                f"اقترحنا موعد {when}. قبل ما نثبته بالنظام بدنا موافقتك — "
+                "إذا مناسب قولي «تمام» أو اضغط ✅، وإذا لا في مش مانع."
+            )
+        if any(w in norm for w in ("كيف", "شو", "ماذا", "ايش")):
+            return (
+                "هاي آخر خطوة: إما تأكيد الموعد المعروض، أو تختار وقت ثاني، أو إلغاء. "
+                "استخدم الأزرار تحت إذا أسهل عليك."
+            )
+        return self._confirm_nudge()
+
+    async def _confirm_natural_reply(self, text: str) -> tuple[str, UIAction, dict]:
+        # existing implementation unchanged
+        """Gemini fallback only when rules did not already answer."""
+        if gemini.is_ready:
+            answer = await gemini.answer_in_booking_context(
+                text,
+                self.state.name,
+                {
+                    **self.data,
+                    "slot": self.slot,
+                    "slot_options": self.slot_options,
+                    "slot_count": len(self.slot_options),
+                },
+                self._confirm_gemini_hint(),
+            )
+            if answer and "✅ لتأكيد" not in answer:
+                return self._reply(answer.strip(), UIAction.SHOW_CONFIRM)
+        return self._reply(self._confirm_nudge(), UIAction.SHOW_CONFIRM)
 
     async def _finalize(self) -> dict:
         from database.db import get_db
@@ -1249,8 +1281,12 @@ class PatientFSM:
         alt_hint = ""
         if len(self.slot_options) > 1:
             alt_hint = f"\n\n🔄 في {len(self.slot_options) - 1} مواعيد ثانية — قولي «موعد آخر» أو اضغط 🔄."
+
+        header = self.data.pop("custom_reply", None)
+        prefix = f"{header}\n\n" if header else "وجدت موعداً مناسباً! 📅\n\n"
+
         return self._reply(
-            f"وجدت موعد مناسب! 📅\n\n"
+            f"{prefix}"
             f"📆 {dt}\n"
             f"🏥 التخصص: {self.data.get('specialty_ar', '')}\n"
             f"👨‍⚕️ الطبيب: {self.slot.get('doctor_name') or '—'}\n"
@@ -1270,6 +1306,58 @@ class PatientFSM:
     def _is_new_booking_request(self, text: str) -> bool:
         lowered = (text or "").lower().strip()
         return any(token in lowered for token in ["حجز موعد", "موعد جديد", "ابدأ", "من جديد", "restart", "book"])
+
+    def _terminal_meta_reply(self, raw: str, norm: str) -> str | None:
+        """Rule-based answers after booking flow ends — works without LLM."""
+        from config import CLINIC_NAME, DASHBOARD_HOST, DASHBOARD_PORT
+
+        if not raw.strip():
+            return None
+
+        if _is_bot_meta_question(raw) or any(p in norm for p in ("وظيف", "شغل", "دورك", "بتعمل", "مساعد")):
+            return (
+                f"أنا مساعد حجز المواعيد في {CLINIC_NAME} 🏥 — "
+                "بساعدك تحجز موعد، تستعلم عن حجزك، أو تلغيه. "
+                "لحجز جديد اكتب: حجز موعد جديد 📅"
+            )
+
+        if any(p in norm for p in ("اداره", "ادارة", "لوحه", "لوحة", "dashboard", "admin", "الادارة")):
+            dashboard_url = f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"
+            return (
+                f"لوحة إدارة العيادة: {dashboard_url}\n"
+                "منها بتقدر تشوف المواعيد والمرضى والأطباء.\n"
+                "وللحجز من هون اكتب: حجز موعد جديد 📅"
+            )
+
+        if any(p in norm for p in ("تواصل", "اتصل", "رقم", "هاتف", "موقع", "عنوان")):
+            return (
+                "📞 للتواصل مع العيادة استخدم «📞 تواصل مع العيادة» من القائمة، "
+                "أو اكتب رسالتك هنا وسيتم حفظها في سجل المحادثات."
+            )
+
+        return None
+
+    def _handle_terminal_state(self, text: str) -> tuple[str, UIAction, dict] | None:
+        """Reply when FSM is done (FINALIZED/CANCELLED/WAITLISTED). None = fall through after reset."""
+        raw = (text or "").strip()
+        norm = normalize(raw)
+
+        if self.state == State.CANCELLED and (
+            _looks_like_decline(norm) or _matches_any_token(norm, CANCEL_WORDS)
+        ):
+            return self._reply(
+                "تمام، ما في مشكلة. إذا احتجت أي شي لاحقاً أنا هون. 👋",
+                UIAction.SHOW_MAIN_MENU,
+            )
+
+        meta = self._terminal_meta_reply(raw, norm)
+        if meta:
+            return self._reply(meta, UIAction.SHOW_MAIN_MENU)
+
+        return self._reply(
+            "تم إنهاء الطلب السابق. إذا بدك حجز جديد اكتب: حجز موعد جديد 📅",
+            UIAction.SHOW_MAIN_MENU,
+        )
 
     def _reset(self) -> None:
         self.state = State.GREETING

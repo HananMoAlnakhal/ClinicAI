@@ -629,3 +629,28 @@ def test_confirm_decline_cancels():
     reply, _ = unpack_fsm(run_async(fsm.handle("ما بدي اشي")))
     assert fsm.state == State.CANCELLED
     assert "ألغيت" in reply
+
+
+def test_cancelled_meta_question_gets_role_reply():
+    fsm = PatientFSM(user_id=81018)
+    fsm.state = State.CANCELLED
+    reply, _ = unpack_fsm(run_async(fsm.handle("شو وظيفتك")))
+    assert fsm.state == State.CANCELLED
+    assert "مساعد حجز" in reply
+
+
+def test_cancelled_admin_request_shows_dashboard():
+    fsm = PatientFSM(user_id=81019)
+    fsm.state = State.CANCELLED
+    reply, _ = unpack_fsm(run_async(fsm.handle("بدي اشوف الادارة")))
+    assert fsm.state == State.CANCELLED
+    assert "لوحة" in reply
+    assert "8000" in reply
+
+
+def test_cancelled_decline_after_cancel_is_polite():
+    fsm = PatientFSM(user_id=81020)
+    fsm.state = State.CANCELLED
+    reply, _ = unpack_fsm(run_async(fsm.handle("لا ما بدي")))
+    assert fsm.state == State.CANCELLED
+    assert "تمام" in reply
