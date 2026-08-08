@@ -264,6 +264,24 @@ class PatientFSM:
         if self.state in (State.FINALIZED, State.CANCELLED, State.WAITLISTED):
             if self._is_new_booking_request(text):
                 self._reset()
+            elif self._is_clarification_request(text) or GeminiClient.looks_like_question(text):
+                meta = self._terminal_meta_reply(text.strip(), norm)
+                if meta:
+                    return self._reply(meta, UIAction.SHOW_MAIN_MENU)
+                if gemini.is_ready:
+                    answer = await gemini.answer_in_booking_context(
+                        text,
+                        self.state.name,
+                        self.data,
+                        self._current_field_question(),
+                    )
+                    if answer:
+                        return self._reply(answer, UIAction.SHOW_MAIN_MENU)
+                return self._reply(
+                    "معذرة إذا الكلام تكرر 🙏 الحجز السابق خلص. "
+                    "إذا بدك موعد جديد اكتب «بدي احجز» أو اختر 📅 حجز موعد جديد.",
+                    UIAction.SHOW_MAIN_MENU,
+                )
             else:
                 terminal = self._handle_terminal_state(text)
                 if terminal is not None:
@@ -1304,8 +1322,24 @@ class PatientFSM:
         ])
 
     def _is_new_booking_request(self, text: str) -> bool:
-        lowered = (text or "").lower().strip()
-        return any(token in lowered for token in ["حجز موعد", "موعد جديد", "ابدأ", "من جديد", "restart", "book"])
+        norm = normalize((text or "").strip()).lower()
+        if not norm:
+            return False
+
+        explicit = (
+            "حجز موعد", "موعد جديد", "ابدأ", "من جديد", "restart", "book",
+            "بدي احجز", "بدي موعد", "بدي حجز", "اريد احجز", "ابغى احجز",
+            "حاب احجز", "احجز موعد", "حجز جديد", "📅",
+        )
+        if any(token in norm for token in explicit):
+            return True
+
+        if ("احجز" in norm or "حجز" in norm) and any(
+            w in norm for w in ("بدي", "اريد", "ابغى", "حاب", "بدها", "حابب", "بدنا")
+        ):
+            return True
+
+        return False
 
     def _terminal_meta_reply(self, raw: str, norm: str) -> str | None:
         """Rule-based answers after booking flow ends — works without LLM."""
@@ -1335,6 +1369,18 @@ class PatientFSM:
                 "أو اكتب رسالتك هنا وسيتم حفظها في سجل المحادثات."
             )
 
+        if any(p in norm for p in ("ليش", "ليه", "لماذا", "بتكرر", "تكرر", "كل مرة", "مالك", "شو مالك")):
+            return (
+                "معذرة إذا الرد تكرر 🙏 الحجز السابق خلص. "
+                "إذا بدك موعد جديد اكتب «بدي احجز» أو اختر 📅 حجز موعد جديد من القائمة."
+            )
+
+        if norm in {".", "..", "...", "؟", "?"}:
+            return (
+                "أنا هون إذا بدك مساعدة 😊 "
+                "لحجز جديد اكتب «بدي احجز» أو اختر 📅 حجز موعد جديد."
+            )
+
         return None
 
     def _handle_terminal_state(self, text: str) -> tuple[str, UIAction, dict] | None:
@@ -1355,7 +1401,7 @@ class PatientFSM:
             return self._reply(meta, UIAction.SHOW_MAIN_MENU)
 
         return self._reply(
-            "تم إنهاء الطلب السابق. إذا بدك حجز جديد اكتب: حجز موعد جديد 📅",
+            "الحجز السابق خلص ✅ إذا بدك موعد جديد اكتب «بدي احجز» أو اختر 📅 حجز موعد جديد.",
             UIAction.SHOW_MAIN_MENU,
         )
 

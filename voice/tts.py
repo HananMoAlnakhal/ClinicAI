@@ -29,7 +29,7 @@ async def text_to_ogg(text: str) -> bytes:
     try:
         communicate = edge_tts.Communicate(text=clean, voice=TTS_VOICE, rate="-5%")
         await communicate.save(str(mp3_path))
-        _mp3_to_ogg(mp3_path, ogg_path)
+        await asyncio.to_thread(_mp3_to_ogg, mp3_path, ogg_path)
         return ogg_path.read_bytes()
     finally:
         mp3_path.unlink(missing_ok=True)

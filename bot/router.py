@@ -3,6 +3,8 @@ bot/router.py — Task: "Server connecting all components"
 Routes every incoming Telegram update to the correct handler
 based on whether the sender is a registered doctor or a patient.
 """
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
 from database.db import get_db
@@ -10,9 +12,13 @@ from database import crud
 from bot.handlers import patient as patient_handler
 from bot.handlers import doctor  as doctor_handler
 
+logger = logging.getLogger(__name__)
+
 
 async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    preview = (update.message.text or "")[:80] if update.message else ""
+    logger.info("Incoming text from %s: %r", user_id, preview)
     with get_db() as db:
         doctor = crud.get_doctor_by_telegram(db, user_id)
 
@@ -47,6 +53,7 @@ async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def route_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    logger.info("Incoming /start from %s", user_id)
     with get_db() as db:
         doctor = crud.get_doctor_by_telegram(db, user_id)
 

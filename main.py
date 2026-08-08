@@ -7,6 +7,7 @@ Single entry point. Starts:
 """
 import logging
 import socket
+import sys
 import threading
 
 import uvicorn
@@ -38,6 +39,12 @@ from config import (
 from dashboard.routes import router as dashboard_router
 from database.db import init_db
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -88,10 +95,25 @@ def build_bot() -> Application:
         proxy=TELEGRAM_PROXY,
         httpx_kwargs=httpx_kwargs,
     )
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
+        .concurrent_updates(True)
+        .build()
+    )
 
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Telegram update failed: %s", context.error, exc_info=context.error)
+        if update and hasattr(update, "effective_message"):
+            message = update.effective_message
+            if message is not None:
+                try:
+                    await message.reply_text(
+                        "⚠️ صار خطأ مؤقت. جرّب إرسال /start مرة ثانية."
+                    )
+                except Exception:
+                    pass
 
     app.add_error_handler(on_error)
 
@@ -106,11 +128,15 @@ def build_bot() -> Application:
 # ── Startup ────────────────────────────────────────────────────────────────────
 
 def main():
-    print("🏥 ClinicAI starting...")
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN is missing in .env")
+        sys.exit(1)
+
+    print("ClinicAI starting...")
 
     # 1. Initialize database
     init_db()
-    print("✅ Database ready")
+    print("Database ready")
 
     # 2. Start dashboard in a background daemon thread
     if _port_in_use(DASHBOARD_HOST, DASHBOARD_PORT):
@@ -121,11 +147,12 @@ def main():
     else:
         dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
         dashboard_thread.start()
-        print(f"✅ Dashboard → http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
+        print(f"Dashboard -> http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
 
     # 3. Start Telegram bot (blocking — keeps the process alive)
     proxy_mode = TELEGRAM_PROXY or ("system/env" if TELEGRAM_TRUST_ENV else "direct")
-    print(f"✅ Bot is running (Telegram: {proxy_mode}). Press Ctrl+C to stop.\n")
+    print(f"Bot is running (Telegram: {proxy_mode}). Press Ctrl+C to stop.\n")
+    logger.info("Starting Telegram polling (proxy=%s)", proxy_mode)
     bot = build_bot()
     bot.run_polling(
         drop_pending_updates=True,
