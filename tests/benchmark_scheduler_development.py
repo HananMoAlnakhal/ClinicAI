@@ -75,7 +75,7 @@ def predict_case(row: dict) -> dict:
     data = {
         "complaint": {
             "raw": text,
-            "urgency_score": row.get("urgency_score", 0.2), # القيمة الحقيقية
+            "urgency_score": row.get("urgency_score", 0.2),
             "specialty": pred_clinic,
         },
         "urgency_score": row.get("urgency_score", 0.2),

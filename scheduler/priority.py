@@ -6,8 +6,10 @@ then maps that score to a priority class (P1 / P2 / P3).
 All weights are expert-defined and sum to 1.0.
 """
 from dataclasses import dataclass
+import re
 from datetime import date
 from typing import Dict, Any
+from nlp.normalizer import normalize
 
 # ── Weight table (must sum to 1.0) ────────────────────────────────────────────
 WEIGHTS = {
@@ -25,10 +27,15 @@ THETA_P2 = 0.38 # score >= 0.38 →  P2 (Medium / متوسط)
 
 # ── Specialty urgency levels (f4 encoding) ────────────────────────────────────
 SPECIALTY_SCORES = {
+    # "cardiology":       1.0,
     "neurology":        0.9,
     "orthopedics":      0.5,
     "gynecology":       0.55,
+    # "pediatrics":       0.6,
+    # "ophthalmology":    0.45,
     "dermatology":      0.3,
+    # "dentistry":        0.35,
+    # "pulmonology":      0.60,
     "gastroenterology": 0.45,
     "chronic_diseases": 0.55,
     "elderly":          0.65,
@@ -54,6 +61,57 @@ COMPLAINT_URGENCY_KEYWORDS = {
 }
 COMPLAINT_KEYWORD_SCORES = {"high": 0.85, "medium": 0.55, "low": 0.25}
 DEFAULT_COMPLAINT_SCORE = 0.2
+
+RED_FLAG_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("وجع صدر", "chest_pain"),
+    ("الم صدر", "chest_pain"),
+    ("ضغط على الصدر", "chest_pressure"),
+    ("ضيق نفس", "breathing_difficulty"),
+    ("اختناق", "choking"),
+    ("شلل", "paralysis"),
+    ("تشنج", "seizure"),
+    ("اغماء", "fainting"),
+    ("نزيف", "bleeding"),
+    ("حرق", "burn"),
+    ("كسر مفتوح", "open_fracture"),
+    ("الم شديد", "severe_pain"),
+    ("صداع شديد", "severe_headache"),
+    ("حمى عاليه", "high_fever"),
+    ("سكري مرتفع", "high_glucose"),
+    ("ضغط عالي", "high_blood_pressure"),
+)
+
+
+def _phrase_is_negated(text: str, phrase_start: int) -> bool:
+    """Detect common Arabic negation immediately before a symptom phrase."""
+    prefix = text[max(0, phrase_start - 60):phrase_start].strip()
+    pattern = (
+        r"(?:بدون|من غير|لا يوجد|لا يوجد عندي|ما في|ما عندي|"
+        r"مش موجود|مش عندي|لا اعاني من)"
+        r"(?:\s+\S+){0,2}\s*$"
+    )
+    return bool(re.search(pattern, prefix))
+
+
+def _contains_non_negated(text: str, phrase: str) -> bool:
+    search_start = 0
+    while True:
+        phrase_start = text.find(phrase, search_start)
+        if phrase_start == -1:
+            return False
+        if not _phrase_is_negated(text, phrase_start):
+            return True
+        search_start = phrase_start + len(phrase)
+
+
+def detect_red_flags(raw_text: str) -> list[str]:
+    """Return distinct, non-negated red flags found in the complaint."""
+    text = normalize(raw_text or "")
+    found: list[str] = []
+    for phrase, label in RED_FLAG_PATTERNS:
+        if _contains_non_negated(text, phrase) and label not in found:
+            found.append(label)
+    return found
 
 @dataclass
 class PriorityResult:
@@ -114,9 +172,11 @@ def score_and_classify(data: dict) -> PriorityResult:
 def _score_from_complaint_text(raw: str) -> float | None:
     if not raw or not raw.strip():
         return None
-    text = raw.strip()
+    text = normalize(raw)
+    if detect_red_flags(raw):
+        return 1.0
     for level in ("high", "medium", "low"):
-        if any(kw in text for kw in COMPLAINT_URGENCY_KEYWORDS[level]):
+        if any(_contains_non_negated(text, normalize(kw)) for kw in COMPLAINT_URGENCY_KEYWORDS[level]):
             return COMPLAINT_KEYWORD_SCORES[level]
     return None
 
@@ -124,29 +184,22 @@ def _score_from_complaint_text(raw: str) -> float | None:
 
 def _complaint_score(data: Dict[str, Any]) -> float:
     complaint = data.get("complaint") or {}
-    raw = ""
-    if isinstance(complaint, dict):
-        # Prefer explicit urgency score if available
-        if "urgency_score" in complaint:
-            try:
-                return float(complaint["urgency_score"])
-            except (TypeError, ValueError):
-                return 0.2
-        # Otherwise fallback by complaint category if available
-        category = str(complaint.get("category", "")).lower().strip()
-        category_map = {
-            "critical": 1.0,
-            "high": 0.85,
-            "medium": 0.55,
-            "low": 0.25,
-        }
-        if category in category_map:
-            return category_map[category]
-        raw = str(complaint.get("raw", "")).strip()
-        text_score = _score_from_complaint_text(raw)
-        if text_score is not None:
-            return text_score
-    return DEFAULT_COMPLAINT_SCORE
+    if not isinstance(complaint, dict):
+        complaint = {"raw": str(complaint or "")}
+    raw = str(complaint.get("raw", "") or "").strip()
+    if detect_red_flags(raw):
+        return 1.0
+    if "urgency_score" in complaint:
+        try:
+            return float(complaint["urgency_score"])
+        except (TypeError, ValueError):
+            pass
+    category = str(complaint.get("category", "")).lower().strip()
+    category_map = {"critical": 1.0, "high": 0.85, "medium": 0.55, "low": 0.25}
+    if category in category_map:
+        return category_map[category]
+    text_score = _score_from_complaint_text(raw)
+    return text_score if text_score is not None else DEFAULT_COMPLAINT_SCORE
 
 def _urgency_score(data: Dict[str, Any]) -> float:
     try:

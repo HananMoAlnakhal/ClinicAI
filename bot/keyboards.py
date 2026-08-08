@@ -25,7 +25,10 @@ def time_pref_keyboard() -> ReplyKeyboardMarkup:
 
 
 def confirm_keyboard() -> ReplyKeyboardMarkup:
-    rows = [["✅ تأكيد الحجز", "❌ إلغاء"]]
+    rows = [
+        ["✅ تأكيد الحجز", "✏️ تعديل الموعد"],
+        ["🔄 موعد آخر", "❌ إلغاء"],
+    ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
 
 
@@ -60,13 +63,15 @@ def session_confirm_keyboard() -> ReplyKeyboardMarkup:
 # ── Specialty selection ───────────────────────────────────────────────────────
 
 def specialty_keyboard() -> ReplyKeyboardMarkup:
-    """Shown when classifier confidence is low — reply buttons are easier for patients."""
+    """Shown when classifier confidence is low — keys match scheduler.classifier.SPECIALTY_NAMES_AR."""
     rows = [
-        ["❤️ قلب وأوعية", "🧠 أعصاب"],
+        # ["🫀 قلب وأوعية", "🧠 أعصاب"],
+        ["🫃 جهاز هضمي", "🧠 أعصاب"],
         ["🦴 عظام ومفاصل", "🌸 نساء وتوليد"],
-        ["👶 أطفال", "🦷 أسنان"],
-        ["👁️ عيون", "🧴 جلدية"],
-        ["🩺 طب عام"],
+        # ["👶 أطفال", "🦷 أسنان"],
+        # ["👁️ عيون", "🧴 جلدية"],
+        ["💊 أمراض مزمنة", "🧴 جلدية"],
+        ["🩺 طب عام", "🧓 كبار السن"],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
 

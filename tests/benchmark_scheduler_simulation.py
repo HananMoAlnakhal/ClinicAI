@@ -34,20 +34,21 @@ with open(os.path.join(os.path.dirname(__file__), "data/benchmarks.json"), "r", 
 
 from tests.helpers import infer_urgency_score
 
-def _build_patient_data(text: str) -> dict:
+def _build_patient_data(row: dict) -> dict:
     """Build FSM-like payload, then sanitize like plan_appointment()."""
-    urgency = infer_urgency_score(text)
+    text = row["input"]
+    urgency = row.get("urgency_score", 0.2)
     raw = {
         "complaint": {"raw": text},
         "urgency_score": urgency,
-        "is_followup": any(k in text for k in ("متابعة", "دوري", "روتيني")),
-        "time_pref": {"date": None, "phrase": "أي وقت"},
+        "is_followup": row.get("is_followup", False), # القيمة الحقيقية من الملف
+        "time_pref": row.get("time_pref", {"date": None, "phrase": "أي وقت"}), # التاريخ الحقيقي
     }
     safe = sanitize_input(raw)
     safe["complaint"]["urgency_score"] = urgency
     safe["complaint"]["specialty"] = None
+    safe["specialty_hint"] = row.get("specialty_hint") # استخدام تلميح التخصص
     return safe
-
 
 async def predict_case(row: dict, gemini_client=None, *, gemini_delay: float = 0.0) -> dict:
     """Production-aligned path: sanitize → _classify → score_and_classify."""
@@ -55,7 +56,7 @@ async def predict_case(row: dict, gemini_client=None, *, gemini_delay: float = 0
     if gemini_client is not None and classify_specialty(text)["method"] == "default":
         if gemini_delay > 0:
             await asyncio.sleep(gemini_delay)
-    safe_data = _build_patient_data(text)
+    safe_data = _build_patient_data(row)
 
     spec_result = await _classify(safe_data, gemini_client)
     safe_data["specialty_hint"] = spec_result["specialty"]
@@ -70,8 +71,8 @@ async def predict_case(row: dict, gemini_client=None, *, gemini_delay: float = 0
         "method": spec_result.get("method", "unknown"),
         "confidence": float(spec_result.get("confidence", 0.0)),
         "priority_score": pr.score,
+        "breakdown": pr.breakdown,
     }
-
 
 async def measure_performance_async(
     dataset, predict_fn, gemini_client=None, *, gemini_delay: float = 0.0, warmup: int = 3,
@@ -188,6 +189,7 @@ async def run(
                 "method": method,
                 "confidence": confidence,
                 "priority_score": result["priority_score"],
+                "breakdown": result.get("breakdown"),
             })
 
     n = len(dataset)
@@ -213,6 +215,7 @@ async def run(
                 f"[{w['id']}] exp={w['expected']} pred={w['pred']} "
                 f"method={w['method']} confidence={w['confidence']:.2f} "
                 f"priority_score={w['priority_score']:.3f} | {w['text']}"
+                f"score={w['priority_score']:.3f} | breakdown={w['breakdown']}"
             )
 
     print("\n=== Performance ===")

@@ -1,0 +1,135 @@
+{
+  "_ملاحظة_للفريق": {
+    "variants": [],
+    "category": "",
+    "urgency_score": 0,
+    "specialty": "",
+    "note": "هذه عينة أولية فقط (12 عرَضاً). مهمة الفريق توسيعها إلى 30+ عرَضاً بنفس البنية. مهم: اكتبوا الكلمات بصيغة مطبّعة — بدون همزات (ا بدل أ/إ) والتاء المربوطة في آخر الكلمة تصير ه (كحه مش كحة)."
+  },
+  "chest_pain": {
+    "variants": [
+      "الم صدر",
+      "وجع صدر",
+      "ضغط عالصدر",
+      "الم بالصدر"
+    ],
+    "category": "cardiac",
+    "urgency_score": 0.85,
+    "specialty": "cardiology"
+  },
+  "palpitations": {
+    "variants": [
+      "خفقان",
+      "دقات قلب سريعه",
+      "نبض سريع"
+    ],
+    "category": "cardiac",
+    "urgency_score": 0.7,
+    "specialty": "cardiology"
+  },
+  "toothache": {
+    "variants": [
+      "وجع ضرس",
+      "الم ضرس",
+      "ضرسي",
+      "الم اسنان",
+      "وجع سن"
+    ],
+    "category": "dental",
+    "urgency_score": 0.4,
+    "specialty": "dentistry"
+  },
+  "severe_headache": {
+    "variants": [
+      "صداع شديد",
+      "راسي بيوجعني كتير",
+      "صداع قوي"
+    ],
+    "category": "neuro",
+    "urgency_score": 0.6,
+    "specialty": "neurology"
+  },
+  "dizziness": {
+    "variants": [
+      "دوخه",
+      "دوار",
+      "راسي بيلف"
+    ],
+    "category": "neuro",
+    "urgency_score": 0.5,
+    "specialty": "neurology"
+  },
+  "fever": {
+    "variants": [
+      "سخونه",
+      "حراره",
+      "حمي",
+      "مسخن"
+    ],
+    "category": "general",
+    "urgency_score": 0.45,
+    "specialty": "general_practice"
+  },
+  "cough": {
+    "variants": [
+      "كحه",
+      "سعال",
+      "كحه ناشفه"
+    ],
+    "category": "respiratory",
+    "urgency_score": 0.35,
+    "specialty": "general_practice"
+  },
+  "skin_rash": {
+    "variants": [
+      "طفح جلدي",
+      "حكه",
+      "حبوب بالجلد",
+      "حساسيه جلد"
+    ],
+    "category": "skin",
+    "urgency_score": 0.3,
+    "specialty": "dermatology"
+  },
+  "back_pain": {
+    "variants": [
+      "الم ظهر",
+      "وجع ظهر",
+      "ظهري بيوجعني"
+    ],
+    "category": "musculoskeletal",
+    "urgency_score": 0.35,
+    "specialty": "orthopedics"
+  },
+  "fracture": {
+    "variants": [
+      "كسر",
+      "انكسرت ايدي",
+      "انكسرت رجلي"
+    ],
+    "category": "musculoskeletal",
+    "urgency_score": 0.8,
+    "specialty": "orthopedics"
+  },
+  "pregnancy": {
+    "variants": [
+      "حامل",
+      "حمل",
+      "متابعه حمل"
+    ],
+    "category": "obgyn",
+    "urgency_score": 0.4,
+    "specialty": "gynecology"
+  },
+  "child_fever": {
+    "variants": [
+      "طفلي مسخن",
+      "ابني عنده حراره",
+      "بنتي مسخنه",
+      "طفلي عنده سخونه"
+    ],
+    "category": "pediatric",
+    "urgency_score": 0.55,
+    "specialty": "pediatrics"
+  }
+}
