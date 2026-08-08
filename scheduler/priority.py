@@ -6,33 +6,39 @@ then maps that score to a priority class (P1 / P2 / P3).
 All weights are expert-defined and sum to 1.0.
 """
 from dataclasses import dataclass
+import re
+from datetime import date
+from typing import Dict, Any
+from nlp.normalizer import normalize
 
 # ── Weight table (must sum to 1.0) ────────────────────────────────────────────
 WEIGHTS = {
-    "complaint":  0.35,   # f1 — what the patient has (most important signal)
-    "urgency":    0.25,   # f2 — patient's stated urgency
-    "followup":   0.15,   # f3 — follow-up vs new case
-    "specialty":  0.15,   # f4 — specialty urgency level
+    "complaint":  0.38,   # f1 — what the patient has (most important signal)
+    "urgency":    0.28,   # f2 — patient's stated urgency
+    "followup":   0.12,   # f3 — follow-up vs new case
+    "specialty":  0.12,   # f4 — specialty urgency level
     "timing":     0.10,   # f5 — how soon they want the appointment
 }
 
 # ── Priority thresholds ────────────────────────────────────────────────────────
-THETA_P1 = 0.68   # score >= 0.68  →  P1 (High / عاجل)
-THETA_P2 = 0.38   # score >= 0.38  →  P2 (Medium / متوسط)
-                  # score <  0.38  →  P3 (Routine / روتيني)
+THETA_P1 = 0.66 # score >= 0.66 →  P1 (High / عاجل)
+THETA_P2 = 0.38 # score >= 0.38 →  P2 (Medium / متوسط)
+                  # score <  0.38 →  P3 (Routine / روتيني)
 
 # ── Specialty urgency levels (f4 encoding) ────────────────────────────────────
 SPECIALTY_SCORES = {
-    "cardiology":       1.0,
+    # "cardiology":       1.0,
     "neurology":        0.9,
-    "emergency":        1.0,
-    "endocrinology":    0.6,
     "orthopedics":      0.5,
     "gynecology":       0.55,
-    "ophthalmology":    0.45,
+    # "pediatrics":       0.6,
+    # "ophthalmology":    0.45,
     "dermatology":      0.3,
-    "dentistry":        0.35,
-    "pediatrics":       0.6,
+    # "dentistry":        0.35,
+    # "pulmonology":      0.60,
+    "gastroenterology": 0.45,
+    "chronic_diseases": 0.55,
+    "elderly":          0.65,
     "general_practice": 0.3,
 }
 
@@ -47,6 +53,65 @@ TIMING_SCORES = {
     30: 0.1,   # this month
 }
 
+# ── Complaint text urgency hints (used when urgency_score absent) ──
+COMPLAINT_URGENCY_KEYWORDS = {
+    "high":   ["حاد", "شديد", "جدا", "مفاجئ", "فجأة", "لا أستطيع", "لا يستطيع", "عاجل", "أزمة"],
+    "medium": ["متوسط", "مزمن", "متكرر", "مستمر"],
+    "low":    ["خفيف", "بسيط", "أحيان", "دوري", "روتيني", "متابعة"],
+}
+COMPLAINT_KEYWORD_SCORES = {"high": 0.85, "medium": 0.55, "low": 0.25}
+DEFAULT_COMPLAINT_SCORE = 0.2
+
+RED_FLAG_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("وجع صدر", "chest_pain"),
+    ("الم صدر", "chest_pain"),
+    ("ضغط على الصدر", "chest_pressure"),
+    ("ضيق نفس", "breathing_difficulty"),
+    ("اختناق", "choking"),
+    ("شلل", "paralysis"),
+    ("تشنج", "seizure"),
+    ("اغماء", "fainting"),
+    ("نزيف", "bleeding"),
+    ("حرق", "burn"),
+    ("كسر مفتوح", "open_fracture"),
+    ("الم شديد", "severe_pain"),
+    ("صداع شديد", "severe_headache"),
+    ("حمى عاليه", "high_fever"),
+    ("سكري مرتفع", "high_glucose"),
+    ("ضغط عالي", "high_blood_pressure"),
+)
+
+
+def _phrase_is_negated(text: str, phrase_start: int) -> bool:
+    """Detect common Arabic negation immediately before a symptom phrase."""
+    prefix = text[max(0, phrase_start - 60):phrase_start].strip()
+    pattern = (
+        r"(?:بدون|من غير|لا يوجد|لا يوجد عندي|ما في|ما عندي|"
+        r"مش موجود|مش عندي|لا اعاني من)"
+        r"(?:\s+\S+){0,2}\s*$"
+    )
+    return bool(re.search(pattern, prefix))
+
+
+def _contains_non_negated(text: str, phrase: str) -> bool:
+    search_start = 0
+    while True:
+        phrase_start = text.find(phrase, search_start)
+        if phrase_start == -1:
+            return False
+        if not _phrase_is_negated(text, phrase_start):
+            return True
+        search_start = phrase_start + len(phrase)
+
+
+def detect_red_flags(raw_text: str) -> list[str]:
+    """Return distinct, non-negated red flags found in the complaint."""
+    text = normalize(raw_text or "")
+    found: list[str] = []
+    for phrase, label in RED_FLAG_PATTERNS:
+        if _contains_non_negated(text, phrase) and label not in found:
+            found.append(label)
+    return found
 
 @dataclass
 class PriorityResult:
@@ -83,12 +148,18 @@ def score_and_classify(data: dict) -> PriorityResult:
     )
     score = round(min(max(score, 0.0), 1.0), 4)
 
+    PRIORITY_LABELS_AR = {
+        "P1": "عاجل",
+        "P2": "متوسط",
+        "P3": "روتيني",
+    }
+
     if score >= THETA_P1:
-        cls, label_ar, color = "P1", "🔴 عاجل", "red"
+        cls, label_ar, color = "P1", PRIORITY_LABELS_AR["P1"], "red"
     elif score >= THETA_P2:
-        cls, label_ar, color = "P2", "🟡 متوسط", "yellow"
+        cls, label_ar, color = "P2", PRIORITY_LABELS_AR["P2"], "yellow"
     else:
-        cls, label_ar, color = "P3", "🟢 روتيني", "green"
+        cls, label_ar, color = "P3", PRIORITY_LABELS_AR["P3"], "green"
 
     return PriorityResult(
         score=score,
@@ -98,50 +169,78 @@ def score_and_classify(data: dict) -> PriorityResult:
         breakdown={"f1": f1, "f2": f2, "f3": f3, "f4": f4, "f5": f5},
     )
 
+def _score_from_complaint_text(raw: str) -> float | None:
+    if not raw or not raw.strip():
+        return None
+    text = normalize(raw)
+    if detect_red_flags(raw):
+        return 1.0
+    for level in ("high", "medium", "low"):
+        if any(_contains_non_negated(text, normalize(kw)) for kw in COMPLAINT_URGENCY_KEYWORDS[level]):
+            return COMPLAINT_KEYWORD_SCORES[level]
+    return None
 
 # ── Factor encoders ────────────────────────────────────────────────────────────
 
-def _complaint_score(data: dict) -> float:
+def _complaint_score(data: Dict[str, Any]) -> float:
     complaint = data.get("complaint") or {}
-    if isinstance(complaint, dict):
-        return float(complaint.get("urgency_score", 0.2))
-    return 0.2
+    if not isinstance(complaint, dict):
+        complaint = {"raw": str(complaint or "")}
+    raw = str(complaint.get("raw", "") or "").strip()
+    if detect_red_flags(raw):
+        return 1.0
+    if "urgency_score" in complaint:
+        try:
+            return float(complaint["urgency_score"])
+        except (TypeError, ValueError):
+            pass
+    category = str(complaint.get("category", "")).lower().strip()
+    category_map = {"critical": 1.0, "high": 0.85, "medium": 0.55, "low": 0.25}
+    if category in category_map:
+        return category_map[category]
+    text_score = _score_from_complaint_text(raw)
+    return text_score if text_score is not None else DEFAULT_COMPLAINT_SCORE
+
+def _urgency_score(data: Dict[str, Any]) -> float:
+    try:
+        return float(data.get("urgency_score", 0.3))
+    except (TypeError, ValueError):
+        return 0.3
 
 
-def _urgency_score(data: dict) -> float:
-    return float(data.get("urgency_score", 0.3))
-
-
-def _followup_score(data: dict) -> float:
+def _followup_score(data: Dict[str, Any]) -> float:
     # Follow-ups get a small bump — they already have a relationship with the clinic
     return 0.5 if data.get("is_followup") else 0.2
 
 
-def _specialty_score(data: dict) -> float:
-    # Use specialty from complaint first, then the hint from NLP
+def _specialty_score(data: Dict[str, Any]) -> float:
+    # Use specialty from complaint first, then NLP hint
     complaint = data.get("complaint") or {}
+    if not isinstance(complaint, dict):
+        complaint = {}
     specialty = (
-        complaint.get("specialty")
-        or data.get("specialty_hint")
+        data.get("specialty_hint")
+        or complaint.get("specialty")
         or "general_practice"
     )
+    specialty = str(specialty).lower().strip()
     return SPECIALTY_SCORES.get(specialty, 0.3)
 
-
-def _timing_score(data: dict) -> float:
-    time_pref = data.get("time_pref") or {}
-    if not time_pref.get("date"):
-        return 0.3  # no preference stated
-
-    from datetime import date
+def _timing_score(data: Dict[str, Any]) -> float:
+    time_pref = data.get("time_pref")
+    # Type-safety first
+    if not isinstance(time_pref, dict):
+        return 0.4
+    pref_date_raw = time_pref.get("date")
+    if not pref_date_raw:
+        return 0.4 # no explicit date preference
     try:
-        pref_date = date.fromisoformat(time_pref["date"])
+        pref_date = date.fromisoformat(str(pref_date_raw))
         delta = (pref_date - date.today()).days
         delta = max(delta, 0)
     except (ValueError, TypeError):
-        return 0.3
+        return 0.4
 
-    # Find the closest bracket
     for threshold in sorted(TIMING_SCORES.keys()):
         if delta <= threshold:
             return TIMING_SCORES[threshold]
