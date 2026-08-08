@@ -54,6 +54,10 @@ _OFF_TOPIC_MARKERS = (
     "اسرائيل", "Trump", "ترامب", "bitcoin", "crypto", "وصفة", "طبخ",
 )
 
+PRIMARY_MAX_RETRIES = 3
+PRIMARY_RETRY_BACKOFF_S = (0.5, 1.0, 2.0)
+TRANSIENT_PRIMARY_COOLDOWN_S = 30.0
+
 
 class GeminiClient:
     """Primary: OpenRouter (gpt-4.1-mini). Fallback: Google Gemma."""
@@ -134,7 +138,91 @@ class GeminiClient:
     def _cooldown_seconds(exc: Exception) -> float | None:
         if GeminiClient._is_quota_error(exc):
             return 60.0
+        if GeminiClient._is_transient_error(exc):
+            return TRANSIENT_PRIMARY_COOLDOWN_S
         return None
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        """Network / connection errors worth retrying or falling back."""
+        if isinstance(
+            exc,
+            (
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.RemoteProtocolError,
+                httpx.NetworkError,
+                ConnectionError,
+                TimeoutError,
+            ),
+        ):
+            return True
+        err = str(exc).lower()
+        markers = (
+            "10054",
+            "10053",
+            "10060",
+            "winerror",
+            "connection reset",
+            "connection aborted",
+            "forcibly closed",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "eof occurred",
+            "connection refused",
+            "server disconnected",
+            "remote end closed",
+            "unexpected eof",
+        )
+        return any(marker in err for marker in markers)
+
+    @staticmethod
+    def _should_fallback_to_gemini(exc: Exception) -> bool:
+        return GeminiClient._is_quota_error(exc) or GeminiClient._is_transient_error(exc)
+
+    async def _call_primary_with_retries(self, prompt: str, max_tokens: int) -> str:
+        last_exc: Exception | None = None
+        for attempt in range(PRIMARY_MAX_RETRIES):
+            try:
+                return await asyncio.to_thread(
+                    self._generate_sync,
+                    self._primary_model,
+                    prompt,
+                    max_tokens,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_transient_error(exc) or attempt >= PRIMARY_MAX_RETRIES - 1:
+                    raise
+                wait_s = PRIMARY_RETRY_BACKOFF_S[min(attempt, len(PRIMARY_RETRY_BACKOFF_S) - 1)]
+                logger.warning(
+                    "Primary LLM transient error (attempt %s/%s): %s — retry in %.1fs",
+                    attempt + 1,
+                    PRIMARY_MAX_RETRIES,
+                    exc,
+                    wait_s,
+                )
+                await asyncio.sleep(wait_s)
+        if last_exc is not None:
+            raise last_exc
+        return ""
+
+    async def _invoke_fallback(self, prompt: str, max_tokens: int) -> str:
+        if not self._fallback_model:
+            return ""
+        try:
+            return await asyncio.to_thread(
+                self._generate_sync,
+                self._fallback_model,
+                prompt,
+                max_tokens,
+            )
+        except Exception as fallback_exc:
+            logger.warning("Fallback model ask failed: %s", fallback_exc)
+            return ""
 
     def _generate_openrouter_sync(self, model: str, prompt: str, max_tokens: int) -> str:
         url = f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions"
@@ -189,30 +277,33 @@ class GeminiClient:
         is_primary = model == self._primary_model
 
         try:
+            if is_primary:
+                return await self._call_primary_with_retries(prompt, max_tokens)
             return await asyncio.to_thread(self._generate_sync, model, prompt, max_tokens)
         except Exception as exc:
             if (
                 is_primary
-                and self._is_quota_error(exc)
+                and self._should_fallback_to_gemini(exc)
                 and self._activate_fallback(str(exc)[:120])
             ):
                 cooldown = self._cooldown_seconds(exc)
                 if cooldown:
-                    self._enter_primary_cooldown(cooldown, "API quota/rate limit")
-                try:
-                    return await asyncio.to_thread(
-                        self._generate_sync,
-                        self._fallback_model,
-                        prompt,
-                        max_tokens,
+                    reason = (
+                        "API quota/rate limit"
+                        if self._is_quota_error(exc)
+                        else "transient network error"
                     )
-                except Exception as fallback_exc:
-                    logger.warning("Fallback model ask failed: %s", fallback_exc)
-                    return ""
+                    self._enter_primary_cooldown(cooldown, reason)
+                return await self._invoke_fallback(prompt, max_tokens)
 
             cooldown = self._cooldown_seconds(exc)
             if cooldown and is_primary:
-                self._enter_primary_cooldown(cooldown, "API quota/rate limit")
+                reason = (
+                    "API quota/rate limit"
+                    if self._is_quota_error(exc)
+                    else "transient network error"
+                )
+                self._enter_primary_cooldown(cooldown, reason)
             else:
                 logger.warning("LLM ask failed (%s): %s", model, exc)
             return ""
@@ -304,6 +395,103 @@ class GeminiClient:
         if cleaned.upper() == "NONE" or not cleaned:
             return ""
         return cleaned
+
+    async def booking_turn(
+        self,
+        user_message: str,
+        phase: str,
+        collected: dict,
+        chat_history: list[dict] | None = None,
+        slot_context: dict | None = None,
+        operation_context: dict | None = None,
+    ) -> str:
+        """Single unified LLM turn: natural reply + intent + field extraction."""
+        if not self.is_ready:
+            return ""
+
+        import json as _json
+
+        history_lines = []
+        for item in (chat_history or [])[-12:]:
+            role = item.get("role", "user")
+            content = (item.get("content") or "").strip()
+            if content:
+                prefix = "المريض" if role == "user" else "المساعد"
+                history_lines.append(f"{prefix}: {content}")
+
+        collected_summary = []
+        if collected.get("name"):
+            collected_summary.append(f"الاسم: {collected['name']}")
+        complaint = collected.get("complaint")
+        if isinstance(complaint, dict) and complaint.get("raw"):
+            collected_summary.append(f"الشكوى: {complaint['raw']}")
+        elif isinstance(complaint, str) and complaint:
+            collected_summary.append(f"الشكوى: {complaint}")
+        if collected.get("urgency_score") is not None:
+            collected_summary.append(f"الأولوية: {collected['urgency_score']}")
+        tp = collected.get("time_pref")
+        if isinstance(tp, dict) and (tp.get("phrase") or tp.get("date")):
+            collected_summary.append(f"وقت الموعد: {tp.get('phrase') or tp.get('date')}")
+
+        op_ctx = operation_context or {}
+        op_lines = []
+        if op_ctx.get("missing_fields"):
+            op_lines.append(f"حقول ناقصة: {', '.join(op_ctx['missing_fields'])}")
+        if op_ctx.get("stored_appointment"):
+            op_lines.append(f"موعد مسجل: {op_ctx['stored_appointment']}")
+        if op_ctx.get("unsupported_specialty"):
+            op_lines.append(f"تخصص غير متوفر: {op_ctx['unsupported_specialty']}")
+        if op_ctx.get("proposed_slot"):
+            op_lines.append(f"موعد مقترح: {op_ctx['proposed_slot']}")
+        if op_ctx.get("slot_options_count", 0) > 1:
+            op_lines.append(f"بدائل متاحة: {op_ctx['slot_options_count']} مواعيد")
+        if op_ctx.get("terminal_state"):
+            op_lines.append(f"حالة الطلب: {op_ctx['terminal_state']}")
+        if op_ctx.get("rule_hint"):
+            op_lines.append(f"تلميح النظام: {op_ctx['rule_hint']}")
+
+        slot_line = ""
+        if slot_context and not op_ctx.get("proposed_slot"):
+            when = slot_context.get("when") or "—"
+            slot_line = f"\nموعد مقترح للتأكيد: {when}"
+
+        phase_hints = {
+            "CHATTING": "اجمع الاسم والشكوى والأولوية ووقت الموعد المفضل.",
+            "CONFIRM": "المريض بمرحلة تأكيد موعد مقترح — افهم موافقة/رفض/تغيير وقت/موعد آخر.",
+            "GP_FALLBACK": "التخصص المطلوب غير متوفر — اعرض الطب العام وافهم موافقة أو رفض.",
+            "TERMINAL": "انتهى الحجز السابق — ساعد بالاستعلام أو حجز جديد أو توضيح الحالة.",
+        }
+
+        prompt = (
+            f"مرحلة المحادثة: {phase}\n"
+            f"{phase_hints.get(phase, '')}\n"
+            f"البيانات المجمّعة: {', '.join(collected_summary) or 'لا شيء بعد'}\n"
+            + (f"سياق النظام (حقائق فقط — لا تخترع):\n" + "\n".join(op_lines) + "\n" if op_lines else "")
+            + f"{slot_line}\n"
+            + ("سجل المحادثة:\n" + "\n".join(history_lines) + "\n" if history_lines else "")
+            + f"رسالة المريض: {user_message}\n\n"
+            "مهمتك: ردّ طبيعي بالفلسطيني (جملة إلى ثلاث) + تحديد intent + استخراج حقول جديدة.\n"
+            "الحجز والأولوية والتصنيف والإلغاء يقررها النظام — أنت تفهم النية والرد فقط.\n"
+            "لا تشخيص طبي. لا أزرار. لا تكرر أسئلة عن معلومات موجودة.\n\n"
+            "intents: continue, confirm, decline, cancel, accept_gp, reject_gp, inquiry, contact, "
+            "new_booking, next_slot, slot_list, edit_time, off_topic\n\n"
+            "أرجع JSON فقط:\n"
+            + _json.dumps(
+                {
+                    "reply": "...",
+                    "intent": "continue",
+                    "off_topic": False,
+                    "extracted": {
+                        "name": None,
+                        "complaint": None,
+                        "urgency": None,
+                        "time_pref": None,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return await self.ask(prompt, max_tokens=300)
 
     async def classify_and_reply(self, complaint_text: str, patient_name: str = "") -> dict:
         """Single LLM call to classify specialty and generate a warm Palestinian Arabic reply simultaneously."""

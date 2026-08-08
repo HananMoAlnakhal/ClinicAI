@@ -5,16 +5,14 @@ import io
 import logging
 import asyncio
 
-from telegram import Update
+from telegram import ReplyKeyboardRemove, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
-from bot.keyboards import main_menu_keyboard
 from config import TTS_ENABLED, TTS_RESPONSE_MODE
 from database import crud
 from database.db import get_db
-from fsm.fsm_result import keyboard_for_action
-from fsm.patient_fsm import PatientFSM, State, FIELD_QUESTIONS_AR
+from fsm.patient_fsm import PatientFSM, State
 from nlp.normalizer import normalize
 from voice.stt import transcribe_voice
 from voice.tts import text_to_ogg
@@ -45,7 +43,14 @@ def _is_repeat_request(text: str) -> bool:
 
 def _is_inquiry_request(text: str) -> bool:
     lowered = (text or "").lower().strip()
-    return "استعلام" in lowered or "موعدي" in lowered or "🔍" in lowered
+    norm = normalize(lowered)
+    if "استعلام" in lowered or "موعدي" in lowered or "🔍" in lowered:
+        return True
+    if "مواعيد" in norm and any(w in norm for w in ("موجود", "مسجل", "محجوز", "ضايل", "متبق", "باقي")):
+        return True
+    if "موعد" in norm and any(w in norm for w in ("مسجل", "محجوز", "حجزي", "اخر", "آخر", "عندي", "وين")):
+        return True
+    return False
 
 
 _EXPLICIT_CANCEL_PHRASES = (
@@ -128,7 +133,7 @@ def _persist_fsm(fsm: PatientFSM) -> None:
 
 def _format_appointment(appt) -> str:
     if not appt:
-        return "لا يوجد موعد مسجل باسمك حالياً. يمكنك اختيار 📅 حجز موعد جديد."
+        return "لا يوجد موعد مسجل باسمك حالياً. اكتب «حجز موعد جديد» لبدء حجز."
     date_text = (
         appt.appt_datetime.strftime("%A، %d/%m/%Y — %H:%M")
         if appt.appt_datetime
@@ -164,29 +169,18 @@ def _should_send_voice(incoming_was_voice: bool) -> bool:
     return TTS_RESPONSE_MODE == "auto" and incoming_was_voice
 
 
-def _begin_booking(user_id: int) -> tuple[str, object | None]:
-    fsm = _get_fsm(user_id, reset=True)
-    fsm._preload_patient_name()
-    if fsm.data.get("name"):
-        fsm.state = State.COLLECT_COMPLAINT
-        reply = f"📅 تمام! أهلاً {fsm.data['name']}، خلينا نبدأ حجز جديد.\n" + FIELD_QUESTIONS_AR["complaint"]
-    else:
-        fsm.state = State.COLLECT_NAME
-        reply = "📅 تمام، خلينا نبدأ حجز جديد. ما اسمك الكريم؟ 😊"
-    _persist_fsm(fsm)
-    return reply, None
-
-
 async def _send_patient_reply(
     message,
     reply: str,
-    keyboard=None,
+    *,
     incoming_was_voice: bool = False,
+    remove_keyboard: bool = False,
 ) -> bool:
     last_exc: Exception | None = None
+    markup = ReplyKeyboardRemove() if remove_keyboard else None
     for attempt in range(3):
         try:
-            await message.reply_text(reply, reply_markup=keyboard)
+            await message.reply_text(reply, reply_markup=markup)
             last_exc = None
             break
         except (TimedOut, NetworkError) as exc:
@@ -219,43 +213,11 @@ def _log_outbound(user_id: int, reply: str, voice_sent: bool = False) -> None:
             crud.log_message(db, user_id, "outbound", "bot_voice", reply)
 
 
-def _menu_response(user_id: int, text: str):
-    """Return (reply, keyboard) for main-menu commands, or None."""
-    if _is_repeat_request(text):
-        reply, kb = _begin_booking(user_id)
-        return reply, kb
-
-    if _is_inquiry_request(text):
-        with get_db() as db:
-            appt = crud.get_latest_patient_appointment(db, user_id)
-            reply = _format_appointment(appt)
-        return reply, main_menu_keyboard()
-
-    if _is_menu_cancel_request(text):
-        with get_db() as db:
-            appt = crud.cancel_latest_patient_appointment(db, user_id)
-        _get_fsm(user_id, reset=True)
-        reply = (
-            "تم إلغاء موعدك وإرجاع خيار الحجز كمتاح في النظام. ✅"
-            if appt
-            else "لا يوجد موعد مؤكد أو منتظر لإلغائه حالياً."
-        )
-        return reply, main_menu_keyboard()
-
-    if _is_contact_request(text):
-        return (
-            "📞 تواصلك وصل. يمكنك كتابة رسالتك هنا، وسيتم حفظها في سجل المحادثات للعيادة.",
-            main_menu_keyboard(),
-        )
-
-    return None
-
-
-async def _handle_fsm_turn(user_id: int, text: str) -> tuple[str, object | None]:
+async def _handle_fsm_turn(user_id: int, text: str) -> str:
     fsm = _get_fsm(user_id)
-    reply, action, _payload = await fsm.handle(text)
+    reply, _action, _payload = await fsm.handle(text)
     _persist_fsm(fsm)
-    return reply, keyboard_for_action(action)
+    return reply
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,20 +227,14 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _get_fsm(user.id, reset=True)
     fsm = _get_fsm(user.id)
-    fsm._preload_patient_name()
-    if fsm.data.get("name"):
-        fsm.state = State.COLLECT_COMPLAINT
-        reply = f"👋 أهلاً {fsm.data['name']}! أنا مساعد الحجز في العيادة. 🩺\n" + FIELD_QUESTIONS_AR["complaint"]
-    else:
-        fsm.state = State.COLLECT_NAME
-        reply = "👋 أهلاً وسهلاً بك في العيادة! 🏥\nأنا مساعد الحجز، " + FIELD_QUESTIONS_AR["name"]
+    reply, _action, _payload = await fsm.welcome_message()
     _persist_fsm(fsm)
 
     with get_db() as db:
         crud.get_or_create_conversation(db, user.id, user.username, user.first_name, user.last_name)
         crud.log_message(db, user.id, "inbound", "command", "/start")
 
-    voice_sent = await _send_patient_reply(update.message, reply, main_menu_keyboard())
+    voice_sent = await _send_patient_reply(update.message, reply, remove_keyboard=True)
     _log_outbound(user.id, reply, voice_sent)
 
 
@@ -299,15 +255,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_start(update, context)
         return
 
-    menu = _menu_response(user.id, text)
-    if menu:
-        reply, keyboard = menu
-        voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=False)
-        _log_outbound(user.id, reply, voice_sent)
-        return
-
-    reply, keyboard = await _handle_fsm_turn(user.id, text)
-    voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=False)
+    reply = await _handle_fsm_turn(user.id, text)
+    voice_sent = await _send_patient_reply(message, reply, incoming_was_voice=False)
     _log_outbound(user.id, reply, voice_sent)
 
 
@@ -340,15 +289,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await message.reply_text(f"🎙️ فهمت رسالتك كالتالي:\n{text}")
 
-    menu = _menu_response(user.id, text)
-    if menu:
-        reply, keyboard = menu
-        voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=True)
-        _log_outbound(user.id, reply, voice_sent)
-        return
-
-    reply, keyboard = await _handle_fsm_turn(user.id, text)
-    voice_sent = await _send_patient_reply(message, reply, keyboard, incoming_was_voice=True)
+    reply = await _handle_fsm_turn(user.id, text)
+    voice_sent = await _send_patient_reply(message, reply, incoming_was_voice=True)
     _log_outbound(user.id, reply, voice_sent)
 
 
@@ -371,27 +313,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crud.log_message(db, user_id, "inbound", "callback", data)
 
     if data == "menu:book":
-        _begin_booking(user_id)
-        reply, keyboard = "📅 جيد! ما اسمك الكريم؟", None
+        fsm = _get_fsm(user_id, reset=True)
+        reply, _action, _ = await fsm.begin_booking_message()
+        _persist_fsm(fsm)
     elif data == "menu:inquiry":
-        with get_db() as db:
-            reply = _format_appointment(crud.get_latest_patient_appointment(db, user_id))
-        keyboard = main_menu_keyboard()
+        fsm = _get_fsm(user_id)
+        reply, _action, _ = await fsm.handle("شو موعدي")
+        _persist_fsm(fsm)
     elif data == "menu:cancel":
-        with get_db() as db:
-            appt = crud.cancel_latest_patient_appointment(db, user_id)
-        _get_fsm(user_id, reset=True)
-        reply = "تم إلغاء آخر موعد مؤكد/منتظر. ✅" if appt else "لا يوجد موعد لإلغائه حالياً."
-        keyboard = main_menu_keyboard()
+        fsm = _get_fsm(user_id)
+        reply, _action, _ = await fsm.handle("إلغاء موعد")
+        _persist_fsm(fsm)
     elif data == "menu:contact":
-        reply, keyboard = "📞 اكتب رسالتك هنا، وسيتم حفظها في سجل محادثات العيادة.", main_menu_keyboard()
+        fsm = _get_fsm(user_id)
+        reply, _action, _ = await fsm.handle("تواصل مع العيادة")
+        _persist_fsm(fsm)
     else:
         fsm = _get_fsm(user_id)
-        reply, action, _ = await fsm.handle_callback(data)
+        reply, _action, _ = await fsm.handle_callback(data)
         _persist_fsm(fsm)
-        keyboard = keyboard_for_action(action)
 
-    await query.edit_message_text(reply, reply_markup=keyboard)
+    await query.edit_message_text(reply)
     voice_sent = False
     if query.message is not None and _should_send_voice(incoming_was_voice=False):
         try:

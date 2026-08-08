@@ -224,11 +224,11 @@ def test_session_persists_across_handler_reload(patient_e2e_db):
     with use_test_db(db):
         row = crud.get_fsm_session(db, PATIENT_ID, role="patient")
     assert row is not None
-    assert row.state == State.COLLECT_URGENCY.name
+    assert row.state == State.CHATTING.name
 
     with use_test_db(db):
         reloaded = patient_handler._get_fsm(PATIENT_ID)
-    assert reloaded.state == State.COLLECT_URGENCY
+    assert reloaded.state == State.CHATTING
     assert reloaded.data.get("name") == "سارة محمود"
 
 

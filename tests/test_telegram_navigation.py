@@ -239,8 +239,7 @@ def nav_db_factory(preview_collector):
 
 
 def _send_name(sim: ChatSimulator, name: str) -> None:
-    """GREETING → COLLECT_NAME needs two turns before the name is stored."""
-    sim.send_text(name)
+    """LLM-first CHATTING accepts a name in one turn."""
     sim.send_text(name)
 
 

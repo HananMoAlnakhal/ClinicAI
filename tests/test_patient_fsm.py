@@ -22,7 +22,9 @@ def _high_confidence_classify(*args, **kwargs):
 
 @pytest.fixture
 def patient_fsm():
-    return PatientFSM(user_id=80002)
+    fsm = PatientFSM(user_id=80002)
+    fsm.services.classify = _high_confidence_classify
+    return fsm
 
 
 def test_parse_time_label_today_and_tomorrow():
@@ -66,14 +68,15 @@ def test_reset_clears_booking_state():
     fsm.data = {"name": "x"}
     fsm.slot = {"slot_id": 1}
     fsm._reset()
-    assert fsm.state == State.GREETING
+    assert fsm.state == State.CHATTING
     assert fsm.data == {}
+    assert fsm.chat_history == []
     assert fsm.slot is None
 
 
 def test_greeting_asks_for_name(patient_fsm):
     reply, keyboard = unpack_fsm(run_async(patient_fsm.handle("مرحبا")))
-    assert patient_fsm.state == State.COLLECT_NAME
+    assert patient_fsm.state == State.CHATTING
     assert FIELD_QUESTIONS_AR["name"] in reply
     assert keyboard is None
 
@@ -81,32 +84,30 @@ def test_greeting_asks_for_name(patient_fsm):
 def test_collect_name_then_complaint(patient_fsm):
     run_async(patient_fsm.handle("start"))
     reply, _ = unpack_fsm(run_async(patient_fsm.handle("سارة محمود")))
-    assert patient_fsm.state == State.COLLECT_COMPLAINT
+    assert patient_fsm.state == State.CHATTING
     assert "سارة" in reply
 
 
 def test_collect_complaint_from_plain_text(patient_fsm):
-    patient_fsm.state = State.COLLECT_COMPLAINT
+    patient_fsm.state = State.CHATTING
     reply, keyboard = unpack_fsm(run_async(patient_fsm.handle("عندي صداع من يومين")))
-    assert patient_fsm.state == State.COLLECT_URGENCY
+    assert patient_fsm.state == State.CHATTING
     assert "complaint" in patient_fsm.data
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_urgency_callback_moves_to_time(patient_fsm):
-    patient_fsm.state = State.COLLECT_URGENCY
+    patient_fsm.state = State.CHATTING
     patient_fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
     reply, keyboard = unpack_fsm(run_async(patient_fsm.handle_callback("urgency:P2")))
-    assert patient_fsm.state == State.COLLECT_TIME
+    assert patient_fsm.state == State.CHATTING
     assert patient_fsm.data["urgency_score"] == 0.5
-    assert keyboard is not None
+    assert keyboard is None
 
 
 @patch("fsm.patient_fsm.gemini")
-@patch("fsm.patient_fsm.classify_with_gemini_fallback", side_effect=_high_confidence_classify)
-@patch("fsm.patient_fsm.classify_specialty", side_effect=_high_confidence_classify)
 @patch("fsm.patient_fsm.score_and_classify")
-def test_full_flow_reaches_confirm_with_slot(mock_score, _mock_classify_rules, mock_classify, mock_gemini, patient_fsm):
+def test_full_flow_reaches_confirm_with_slot(mock_score, mock_gemini, patient_fsm):
     mock_gemini._available = False
     mock_gemini.extract_missing_field = AsyncMock(return_value=None)
     priority = MagicMock(
@@ -138,7 +139,6 @@ def test_full_flow_reaches_confirm_with_slot(mock_score, _mock_classify_rules, m
 
     with patch("database.db.get_db", fake_get_db):
         patient_fsm.services.classify = _high_confidence_classify
-        patient_fsm.services.classify_with_fallback = mock_classify
         patient_fsm.services.score = mock_score
         patient_fsm.services.find_slots = MagicMock(return_value=[slot])
         patient_fsm.services.gemini = mock_gemini
@@ -151,13 +151,12 @@ def test_full_flow_reaches_confirm_with_slot(mock_score, _mock_classify_rules, m
     assert patient_fsm.state == State.CONFIRM
     assert "وجدت موعد" in reply
     assert "درجة الأولوية" not in reply
-    assert keyboard is not None
+    assert keyboard is None
     assert patient_fsm.slot["slot_id"] == 99
 
 
-@patch("fsm.patient_fsm.classify_specialty", side_effect=_high_confidence_classify)
 @patch("fsm.patient_fsm.score_and_classify")
-def test_confirm_yes_finalizes_booking(mock_score, _mock_classify, patient_fsm):
+def test_confirm_yes_finalizes_booking(mock_score, patient_fsm):
     priority = MagicMock(priority_class="P3", score=0.3, label_ar="روتيني", breakdown={})
     mock_score.return_value = priority
 
@@ -207,7 +206,7 @@ def test_confirm_no_cancels(patient_fsm):
 
 
 def test_low_confidence_auto_picks_specialty(patient_fsm):
-    patient_fsm.state = State.COLLECT_TIME
+    patient_fsm.state = State.CHATTING
     patient_fsm.data = {
         "name": "ليلى",
         "complaint": {"raw": "سؤال عام"},
@@ -230,7 +229,7 @@ def test_low_confidence_auto_picks_specialty(patient_fsm):
     assert patient_fsm.state in {State.FIND_SLOT, State.CONFIRM, State.WAITLISTED}
     assert patient_fsm.data.get("specialty_method") == "auto_fallback"
     assert "تخصص" not in reply or "الطب العام" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_required_fields_match_questions():
@@ -240,24 +239,24 @@ def test_required_fields_match_questions():
 
 def test_validate_blocks_scheduling_until_checklist_complete():
     fsm = PatientFSM(user_id=81001)
-    fsm.state = State.COLLECT_TIME
+    fsm.state = State.CHATTING
     fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}, "urgency_score": 0.4}
 
-    with patch("fsm.patient_fsm.classify_specialty") as mock_classify:
+    with patch.object(fsm.services, "classify") as mock_classify:
         mock_classify.assert_not_called()
         reply, _ = unpack_fsm(run_async(fsm.handle("")))
-    assert fsm.state == State.COLLECT_TIME
+    assert fsm.state == State.CHATTING
     assert FIELD_QUESTIONS_AR["time_pref"] in reply
 
 
 def test_clarification_does_not_hijack_normal_booking_phrase():
     fsm = PatientFSM(user_id=81002)
-    fsm.state = State.COLLECT_COMPLAINT
+    fsm.state = State.CHATTING
     fsm.data = {"name": "سارة"}
 
     reply, _ = unpack_fsm(run_async(fsm.handle("فهمت، عندي صداع")))
 
-    assert fsm.state == State.COLLECT_URGENCY
+    assert fsm.state == State.CHATTING
     assert "فهمت إن" not in reply
 
 
@@ -268,15 +267,14 @@ def test_parse_specialty_arabic_full_label():
 
 def test_unclear_urgency_stays_in_collect_urgency():
     fsm = PatientFSM(user_id=81005)
-    fsm.state = State.COLLECT_URGENCY
+    fsm.state = State.CHATTING
     fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
 
     reply, keyboard = unpack_fsm(run_async(fsm.handle("xyz gibberish")))
 
-    assert fsm.state == State.COLLECT_URGENCY
-    assert "urgency_score" not in fsm.data
-    assert "الأولوية" in reply
-    assert keyboard is not None
+    assert fsm.state == State.CHATTING
+    assert "urgency_score" not in fsm.data or fsm.data.get("urgency_score") is None
+    assert keyboard is None
 
 
 def test_specialty_label_keys_match_classifier():
@@ -303,9 +301,8 @@ def test_keyboard_specialty_labels_parse():
             assert key in allowed
 
 
-@patch("fsm.patient_fsm.classify_specialty", side_effect=_high_confidence_classify)
 @patch("fsm.patient_fsm.score_and_classify")
-def test_slot_conflict_retries_with_next_available_slot(mock_score, _mock_classify):
+def test_slot_conflict_retries_with_next_available_slot(mock_score):
     priority = MagicMock(priority_class="P3", score=0.3, label_ar="روتيني", breakdown={})
     mock_score.return_value = priority
 
@@ -358,72 +355,72 @@ def test_slot_conflict_retries_with_next_available_slot(mock_score, _mock_classi
     assert fsm.slot["slot_id"] == 2
     assert "انحجز قبل التأكيد" in reply
     assert "وجدت موعد" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_unsupported_specialty_offers_gp_fallback():
     fsm = PatientFSM(user_id=81007)
-    fsm.state = State.COLLECT_COMPLAINT
+    fsm.state = State.CHATTING
     fsm.data = {"name": "أحمد"}
-    reply, keyboard = unpack_fsm(run_async(fsm.handle("بدي موعد عند طبيب اسنان")))
+    reply, keyboard = unpack_fsm(run_async(fsm.handle("بدي موعد عند طبيب عيون")))
     assert fsm.state == State.OFFER_GP_FALLBACK
     assert "غير متوفرة" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_urgency_free_text_accepted():
     fsm = PatientFSM(user_id=81008)
-    fsm.state = State.COLLECT_URGENCY
+    fsm.state = State.CHATTING
     fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}}
     reply, keyboard = unpack_fsm(run_async(fsm.handle("عاجل")))
-    assert fsm.state == State.COLLECT_TIME
+    assert fsm.state == State.CHATTING
     assert fsm.data["urgency_score"] >= 0.85
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_unclear_time_stays_in_collect_time():
     fsm = PatientFSM(user_id=81010)
-    fsm.state = State.COLLECT_TIME
+    fsm.state = State.CHATTING
     fsm.data = {"name": "أحمد", "complaint": {"raw": "صداع"}, "urgency_score": 0.4}
 
     reply, keyboard = unpack_fsm(run_async(fsm.handle("xyz gibberish")))
 
-    assert fsm.state == State.COLLECT_TIME
+    assert fsm.state == State.CHATTING
     assert "time_pref" not in fsm.data or fsm.data.get("time_pref") is None
     assert "متى" in reply or "موعد" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_greeting_accepts_name_without_second_prompt(patient_fsm):
     reply, _ = unpack_fsm(run_async(patient_fsm.handle("سارة محمود")))
-    assert patient_fsm.state == State.COLLECT_COMPLAINT
+    assert patient_fsm.state == State.CHATTING
     assert "سارة" in reply
     assert FIELD_QUESTIONS_AR["name"] not in reply
 
 
 def test_greeting_only_does_not_accept_as_name(patient_fsm):
     reply, _ = unpack_fsm(run_async(patient_fsm.handle("مرحبا")))
-    assert patient_fsm.state == State.COLLECT_NAME
+    assert patient_fsm.state == State.CHATTING
     assert FIELD_QUESTIONS_AR["name"] in reply
 
 
 def test_ahlan_is_greeting_not_name(patient_fsm):
-    patient_fsm.state = State.COLLECT_NAME
+    patient_fsm.state = State.CHATTING
     reply, _ = unpack_fsm(run_async(patient_fsm.handle("اهلا")))
-    assert patient_fsm.state == State.COLLECT_NAME
+    assert patient_fsm.state == State.CHATTING
     assert "name" not in patient_fsm.data or patient_fsm.data.get("name") != "اهلا"
     assert FIELD_QUESTIONS_AR["name"] in reply
 
 
 def test_ahlan_wa_sahlan_is_greeting_not_name(patient_fsm):
-    patient_fsm.state = State.COLLECT_NAME
+    patient_fsm.state = State.CHATTING
     reply, _ = unpack_fsm(run_async(patient_fsm.handle("اهلا وسهلا")))
-    assert patient_fsm.state == State.COLLECT_NAME
+    assert patient_fsm.state == State.CHATTING
     assert FIELD_QUESTIONS_AR["name"] in reply
 
 
 def test_rule_reply_inadequate_when_question_gets_bare_prompt(patient_fsm):
-    patient_fsm.state = State.COLLECT_NAME
+    patient_fsm.state = State.CHATTING
     assert patient_fsm.rule_reply_seems_inadequate(
         "شو ساعات العيادة؟",
         FIELD_QUESTIONS_AR["name"],
@@ -431,13 +428,13 @@ def test_rule_reply_inadequate_when_question_gets_bare_prompt(patient_fsm):
 
 
 def test_rule_reply_inadequate_when_greeting_stored_as_name(patient_fsm):
-    patient_fsm.state = State.COLLECT_COMPLAINT
+    patient_fsm.state = State.CHATTING
     patient_fsm.data["name"] = "اهلا"
     assert patient_fsm.rule_reply_seems_inadequate("اهلا", "أهلاً اهلا! 😊") is True
 
 
 def test_rule_reply_adequate_for_valid_name(patient_fsm):
-    patient_fsm.state = State.COLLECT_COMPLAINT
+    patient_fsm.state = State.CHATTING
     reply = f"أهلاً سارة! 😊\n{FIELD_QUESTIONS_AR['complaint']}"
     assert patient_fsm.rule_reply_seems_inadequate("سارة", reply) is False
 
@@ -447,11 +444,11 @@ def test_maybe_gemini_fallback_undoes_greeting_as_name(mock_gemini, patient_fsm)
     mock_gemini.is_ready = True
     mock_gemini.build_response = AsyncMock(return_value="أهلاً! ما اسمك الكريم؟")
 
-    patient_fsm.state = State.COLLECT_COMPLAINT
+    patient_fsm.state = State.CHATTING
     patient_fsm.data["name"] = "اهلا"
     reply = run_async(patient_fsm.maybe_gemini_fallback("اهلا"))
     assert reply == "أهلاً! ما اسمك الكريم؟"
-    assert patient_fsm.state == State.COLLECT_NAME
+    assert patient_fsm.state == State.CHATTING
     assert "name" not in patient_fsm.data
 
 
@@ -461,9 +458,9 @@ def test_confirm_edit_returns_to_time_selection():
     fsm.slot = {"slot_id": 1, "slot_datetime": datetime.utcnow()}
     fsm.data = {"name": "أحمد", "time_pref": {"date": str(date.today()), "phrase": "اليوم"}}
     reply, keyboard = unpack_fsm(run_async(fsm.handle("✏️ تعديل الموعد")))
-    assert fsm.state == State.COLLECT_TIME
+    assert fsm.state == State.CHATTING
     assert "متى" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 @patch("fsm.patient_fsm.gemini")
@@ -475,35 +472,24 @@ def test_gp_fallback_locks_general_practice_after_checklist(mock_score, mock_gem
     mock_score.return_value = priority
 
     fsm = PatientFSM(user_id=81012)
-    fsm.state = State.COLLECT_COMPLAINT
+    fsm.state = State.CHATTING
     fsm.data = {"name": "هبة"}
 
-    with patch(
-        "fsm.patient_fsm.classify_with_gemini_fallback",
-        return_value={
-            "specialty": "dermatology",
-            "specialty_ar": "الأمراض الجلدية",
-            "method": "gemini",
-            "confidence": 0.9,
-        },
-    ) as mock_classify:
-        with patch.object(fsm.services, "classify_with_fallback", mock_classify):
-            with patch.object(fsm, "_find_slot", new_callable=AsyncMock) as mock_find:
-                mock_find.return_value = ("وجدت موعد", None, {})
-                unpack_fsm(run_async(fsm.handle("وجع في الصدر")))
-                assert fsm.state == State.OFFER_GP_FALLBACK
-                assert fsm.data["complaint"]["raw"] == "وجع في الصدر"
+    with patch.object(fsm, "_find_slot", new_callable=AsyncMock) as mock_find:
+        mock_find.return_value = ("وجدت موعد", None, {})
+        unpack_fsm(run_async(fsm.handle("وجع في الصدر")))
+        assert fsm.state == State.OFFER_GP_FALLBACK
+        assert fsm.data["complaint"]["raw"] == "وجع في الصدر"
 
-                unpack_fsm(run_async(fsm.handle("✅ تأكيد الحجز")))
-                assert fsm.data["specialty_method"] == "gp_fallback"
+        unpack_fsm(run_async(fsm.handle("✅ تأكيد الحجز")))
+        assert fsm.data["specialty_method"] == "gp_fallback"
 
-                run_async(fsm.handle("🔴 عاجل"))
-                run_async(fsm.handle("اليوم"))
+        run_async(fsm.handle("🔴 عاجل"))
+        run_async(fsm.handle("اليوم"))
 
-                assert fsm.data["specialty_hint"] == "general_practice"
-                assert fsm.data["specialty_ar"] == SPECIALTY_NAMES_AR["general_practice"]
-                mock_classify.assert_not_called()
-                mock_find.assert_called()
+        assert fsm.data["specialty_hint"] == "general_practice"
+        assert fsm.data["specialty_ar"] == SPECIALTY_NAMES_AR["general_practice"]
+        mock_find.assert_called()
 
 
 @patch("fsm.patient_fsm.score_and_classify")
@@ -557,7 +543,7 @@ def test_confirm_why_question_gets_answer():
     assert fsm.state == State.CONFIRM
     assert "موافقتك" in reply or "تأكيد" in reply
     assert "✅ لتأكيد" not in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_confirm_dot_gets_nudge():
@@ -578,10 +564,10 @@ def test_confirm_dot_gets_nudge():
 
 def test_name_dispute_clears_wrong_name():
     fsm = PatientFSM(user_id=81014)
-    fsm.state = State.COLLECT_COMPLAINT
+    fsm.state = State.CHATTING
     fsm.data = {"name": "منال", "complaint": {"raw": "صداع"}}
     reply, _ = unpack_fsm(run_async(fsm.handle("مين قال انه اسمي منال")))
-    assert fsm.state == State.COLLECT_NAME
+    assert fsm.state == State.CHATTING
     assert "name" not in fsm.data
     assert "اسمك" in reply
 
@@ -590,10 +576,10 @@ def test_name_dispute_clears_wrong_name():
 def test_greeting_meta_question_does_not_assume_preloaded_name(mock_gemini):
     mock_gemini.is_ready = False
     fsm = PatientFSM(user_id=81015)
-    fsm.state = State.GREETING
+    fsm.state = State.CHATTING
     fsm.data = {"name": "منال"}
     reply, _ = unpack_fsm(run_async(fsm.handle("ماذا تريد")))
-    assert fsm.state == State.COLLECT_NAME
+    assert fsm.state == State.CHATTING
     assert "name" not in fsm.data
     assert "مساعد حجز" in reply
 
@@ -615,7 +601,7 @@ def test_confirm_lists_available_slots():
     assert "📋 المواعيد المتاحة" in reply
     assert "د. أ" in reply
     assert "د. ب" in reply
-    assert keyboard is not None
+    assert keyboard is None
 
 
 def test_confirm_decline_cancels():
@@ -629,6 +615,36 @@ def test_confirm_decline_cancels():
     reply, _ = unpack_fsm(run_async(fsm.handle("ما بدي اشي")))
     assert fsm.state == State.CANCELLED
     assert "ألغيت" in reply
+
+
+def test_cancelled_frustration_gets_explanation():
+    fsm = PatientFSM(user_id=81021)
+    fsm.state = State.CANCELLED
+    reply, _ = unpack_fsm(run_async(fsm.handle("ليش هيك")))
+    assert fsm.state == State.CANCELLED
+    assert "آسف" in reply or "انتهى" in reply
+    assert "حجز موعد جديد" in reply
+
+
+def test_cancelled_appointment_inquiry_shows_stored_appt():
+    fsm = PatientFSM(user_id=81022)
+    fsm.state = State.CANCELLED
+    appt = MagicMock()
+    appt.appt_id = "appt_x"
+    appt.appt_datetime = datetime.utcnow() + timedelta(days=1)
+    appt.status = "confirmed"
+    appt.specialty_ar = "الطب العام"
+    appt.specialty = "general_practice"
+    appt.slot = MagicMock(doctor=MagicMock(name="د. أ"))
+
+    @contextmanager
+    def fake_get_db():
+        yield MagicMock()
+
+    with patch("database.db.get_db", fake_get_db):
+        with patch("database.crud.get_latest_patient_appointment", return_value=appt):
+            reply, _ = unpack_fsm(run_async(fsm.handle("شو المواعيد الموجودة")))
+    assert "موعدك المسجل" in reply or "appt_x" in reply
 
 
 def test_cancelled_meta_question_gets_role_reply():

@@ -35,3 +35,15 @@ def test_menu_cancel_request_rejects_confirm_keyboard_abort_only(text: str):
 
 def test_menu_cancel_request_rejects_unrelated_text():
     assert patient_handler._is_menu_cancel_request("مرحبا") is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "شو المواعيد الموجودة",
+        "بقلك شو المواعيد الموجودة",
+        "وين موعدي",
+    ],
+)
+def test_inquiry_request_recognizes_natural_phrases(text: str):
+    assert patient_handler._is_inquiry_request(text) is True

@@ -9,11 +9,12 @@ Designed for Palestinian Arabic (informal dialect), with local Whisper speech-to
 ## Features
 
 ### Patient Telegram bot
-- Guided booking flow: name → complaint → urgency → preferred time → specialty routing → slot offer → confirmation
+- **LLM-first free conversation** for booking (name, complaint, urgency, preferred time) via `nlp/booking_agent.py`
+- Rule-based field extraction when the LLM is offline; classifier, priority, and scheduling unchanged
 - **Rule-based Arabic specialty classifier** with LLM fallback when rules are inconclusive
 - **Priority engine** (P1 / P2 / P3) from complaint, urgency, follow-up, specialty, and timing signals
 - **Natural-language handling** at confirmation (informal yes/no, “why?”, slot browsing, decline)
-- Main menu: new booking, appointment inquiry, cancel appointment, contact clinic
+- Main menu actions via free text: new booking, appointment inquiry, cancel, contact clinic
 - **Voice messages**: Whisper transcription; optional TTS voice replies (`auto` mode replies with voice when the patient sent voice)
 - FSM sessions persisted in the database (survives bot restarts)
 
@@ -222,6 +223,7 @@ ClinicAI/
 │   ├── scheduler.py        # Slot search and planning
 │   └── slot_policy.py      # Reservation tiers and ranking
 ├── nlp/
+│   ├── booking_agent.py    # LLM-first patient booking turns + rule fallback
 │   ├── gemini_client.py    # OpenRouter + Gemini LLM client
 │   ├── normalizer.py       # Arabic text normalization
 │   └── extractor.py        # Field extraction helpers
@@ -247,21 +249,20 @@ ClinicAI/
 
 ```mermaid
 stateDiagram-v2
-    [*] --> COLLECT_NAME
-    COLLECT_NAME --> COLLECT_COMPLAINT
-    COLLECT_COMPLAINT --> COLLECT_URGENCY
-    COLLECT_URGENCY --> COLLECT_TIME
-    COLLECT_TIME --> CLASSIFY
+    [*] --> CHATTING
+    CHATTING --> VALIDATE: all fields collected
+    VALIDATE --> CLASSIFY
     CLASSIFY --> FIND_SLOT
-    CLASSIFY --> OFFER_GP_FALLBACK: unsupported / no slots
+    CLASSIFY --> OFFER_GP_FALLBACK: unsupported specialty
     OFFER_GP_FALLBACK --> FIND_SLOT: accepted
     FIND_SLOT --> CONFIRM: slot found
     FIND_SLOT --> WAITLISTED: no slot
     CONFIRM --> FINALIZED: confirmed
+    CONFIRM --> CHATTING: edit time
     CONFIRM --> CANCELLED: declined
 ```
 
-The FSM collects structured data, runs the classifier and priority engine, searches doctor-owned slots, and asks for confirmation with natural Arabic prompts (not rigid button-only instructions).
+The patient bot uses an LLM-driven **CHATTING** phase for natural Palestinian Arabic dialogue. When name, complaint, urgency, and time preference are complete, the existing classifier, priority engine, and slot pipeline run unchanged. Confirmation stays natural-language; there are no Telegram reply keyboards — patients type freely (e.g. «حجز موعد جديد», «شو موعدي», «إلغاء موعد»).
 
 ---
 
@@ -316,9 +317,10 @@ Doctors without a linked Telegram account can still appear on the dashboard; ses
 
 ## LLM usage
 
-The LLM layer (`nlp/gemini_client.py`) is used for:
+The LLM layer (`nlp/gemini_client.py` + `nlp/booking_agent.py`) is used for:
 
-- Context-aware replies when rule-based FSM answers are inadequate
+- **Patient booking conversation** (`booking_turn`): natural replies + structured field extraction each turn
+- Context-aware replies when rule-based answers are inadequate
 - Answering patient questions during booking (without giving medical advice)
 - Specialty classification fallback when regex rules do not match
 
