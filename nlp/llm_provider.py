@@ -67,6 +67,8 @@ class LLMRouter:
                 continue
 
             for attempt in range(self.retries + 1):
+                if not provider.available:
+                    break
                 try:
                     result = await asyncio.to_thread(
                         provider.generate_sync, prompt, max_tokens

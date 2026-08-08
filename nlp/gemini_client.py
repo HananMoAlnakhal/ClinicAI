@@ -76,22 +76,27 @@ class GeminiClient:
         self._using_fallback = not bool(self._primary_model)
         self._primary_cooldown_until = 0.0
 
-        providers = [
-            CallableProvider(
-                "openrouter",
-                lambda prompt, max_tokens: self._generate_openrouter_sync(
-                    self._primary_model, prompt, max_tokens
-                ),
-                enabled=bool(self._primary_model),
-            ),
-            CallableProvider(
-                "gemini",
-                lambda prompt, max_tokens: self._generate_gemini_sync(
-                    self._fallback_model, prompt, max_tokens
-                ),
-                enabled=bool(self._fallback_model),
-            ),
-        ]
+        self._primary_provider = CallableProvider(
+            "openrouter",
+            self._generate_primary_router_sync,
+            enabled=bool(self._primary_model),
+        )
+        self._fallback_provider = CallableProvider(
+            "gemini",
+            lambda prompt, max_tokens: self._generate_sync(self._fallback_model, prompt, max_tokens),
+            enabled=bool(self._fallback_model),
+        )
+        self._primary_provider = CallableProvider(
+            "openrouter",
+            self._generate_primary_router_sync,
+            enabled=bool(self._primary_model),
+        )
+        self._fallback_provider = CallableProvider(
+            "gemini",
+            lambda prompt, max_tokens: self._generate_sync(self._fallback_model, prompt, max_tokens),
+            enabled=bool(self._fallback_model),
+        )
+        providers = [self._primary_provider, self._fallback_provider]
         if LLM_LOCAL_FALLBACK_ENABLED:
             providers.append(LocalFallbackProvider())
         self._router = LLMRouter(providers, retries=LLM_RETRIES)
@@ -162,6 +167,19 @@ class GeminiClient:
             return 60.0
         return None
 
+    def _generate_primary_router_sync(self, prompt: str, max_tokens: int) -> str:
+        if not self._primary_model:
+            return ""
+        try:
+            return self._generate_sync(self._primary_model, prompt, max_tokens)
+        except Exception as exc:
+            cooldown = self._cooldown_seconds(exc)
+            if cooldown:
+                self._enter_primary_cooldown(cooldown, "API quota/rate limit")
+                self._primary_provider.enabled = False
+            self._activate_fallback(str(exc)[:120])
+            raise
+
     def _generate_openrouter_sync(self, model: str, prompt: str, max_tokens: int) -> str:
         url = f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions"
         headers = {
@@ -208,44 +226,17 @@ class GeminiClient:
 
     async def ask(self, prompt: str, max_tokens: int = 300) -> str:
         self._maybe_restore_primary_model()
-
-        models = []
-        if self._using_fallback and self._fallback_model:
-            models.append(self._fallback_model)
-        else:
-            if self._primary_model:
-                models.append(self._primary_model)
-            if self._fallback_model and self._fallback_model not in models:
-                models.append(self._fallback_model)
-
-        for model in models:
-            for attempt in range(LLM_RETRIES + 1):
-                try:
-                    result = await asyncio.to_thread(
-                        self._generate_sync, model, prompt, max_tokens
-                    )
-                    if result:
-                        self._model = model
-                        self._using_fallback = model == self._fallback_model
-                        return result
-                    break
-                except Exception as exc:
-                    is_primary = model == self._primary_model
-                    logger.warning(
-                        "LLM model %s failed (attempt %s/%s): %s",
-                        model, attempt + 1, LLM_RETRIES + 1, exc
-                    )
-                    if is_primary:
-                        cooldown = self._cooldown_seconds(exc)
-                        if cooldown:
-                            self._enter_primary_cooldown(cooldown, "API quota/rate limit")
-                        self._activate_fallback(str(exc)[:120])
-                        if cooldown:
-                            break
-
-        if LLM_LOCAL_FALLBACK_ENABLED:
-            return ""
-        return ""
+        self._primary_provider.enabled = bool(self._primary_model and not self._using_fallback and time.monotonic() >= self._primary_cooldown_until)
+        self._fallback_provider.enabled = bool(self._fallback_model)
+        result = await self._router.ask(prompt, max_tokens=max_tokens)
+        provider = self._router.last_provider
+        if provider == "openrouter" and result:
+            self._model = self._primary_model
+            self._using_fallback = False
+        elif provider == "gemini":
+            self._model = self._fallback_model
+            self._using_fallback = True
+        return result
 
     @staticmethod
     def looks_like_question(text: str) -> bool:
