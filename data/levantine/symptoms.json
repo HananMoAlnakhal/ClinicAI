@@ -1,4 +1,54 @@
 {
+  "صداع": {
+    "variants": [
+      "صداع",
+      "وجع راس",
+      "الم راس"
+    ],
+    "category": "neurology",
+    "urgency_score": 0.4,
+    "specialty": "neurology"
+  },
+  "سكري": {
+    "variants": [
+      "سكري",
+      "سكر",
+      "ضغط سكر"
+    ],
+    "category": "chronic",
+    "urgency_score": 0.3,
+    "specialty": "chronic_diseases"
+  },
+  "كحة": {
+    "variants": [
+      "كحة",
+      "سعال",
+      "كحه"
+    ],
+    "category": "respiratory",
+    "urgency_score": 0.35,
+    "specialty": "general_practice"
+  },
+  "وجع بطن": {
+    "variants": [
+      "وجع بطن",
+      "الم بطن",
+      "مغص"
+    ],
+    "category": "gi",
+    "urgency_score": 0.45,
+    "specialty": "gastroenterology"
+  },
+  "وجع اسنان": {
+    "variants": [
+      "وجع اسنان",
+      "الم اسنان",
+      "سن"
+    ],
+    "category": "dental",
+    "urgency_score": 0.4,
+    "specialty": "dentistry"
+  },
   "_ملاحظة_للفريق": {
     "variants": [],
     "category": "",
