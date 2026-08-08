@@ -108,8 +108,8 @@ def _looks_like_decline(norm: str) -> bool:
     if _matches_any_token(norm, CANCEL_WORDS):
         return True
     decline = (
-        "ما بدي", "مش بدي", "ما بده", "لا بدي", "لا شكر", "مش حاب", "ما بدي اشي",
-        "ما بدي شي", "ما بدي اي", "مو بدي", "مش عايز", "بطل", "خلص", "سكر",
+        "ما بدي", "ما اريد", "مش بدي", "مش اريد", "ما بده", "لا بدي", "لا اريد", "لا شكر", "مش حاب",
+        "ما بدي اشي", "ما اريد اشي", "ما بدي شي", "ما اريد شي", "ما بدي اي", "مو بدي", "مش عايز", "بطل", "خلص", "سكر",
         "مش interested", "no thanks",
     )
     return any(p in norm for p in decline)
@@ -228,7 +228,7 @@ class PatientFSM:
             if self._is_new_booking_request(text):
                 self._reset()
             else:
-                return self._reply("تم إنهاء الطلب السابق. إذا بدك حجز جديد اكتب: حجز موعد جديد 📅", UIAction.SHOW_MAIN_MENU)
+                return self._handle_terminal_state(text)
 
         if _is_name_dispute(text):
             self.data.pop("name", None)
@@ -1346,6 +1346,47 @@ class PatientFSM:
         reply, action, payload = self._format_confirm_message()
         return self._reply("تمام، لقيت لك موعد بديل بنفس العيادة والطبيب.\n\n" + reply, action, payload)
 
+
+    def _terminal_meta_reply(self, raw: str, norm: str) -> str | None:
+        """Natural replies after a booking flow has ended, without changing FSM state."""
+        from config import CLINIC_NAME
+
+        if not raw.strip():
+            return None
+
+        if _is_bot_meta_question(raw) or any(p in norm for p in ("وظيف", "شغل", "دورك", "بتعمل", "مساعد", "مين انت", "من انت")):
+            return (
+                f"أنا مساعد حجز المواعيد في {CLINIC_NAME} 🏥 — "
+                "بساعدك تحجز موعد، تستعلم عن حجزك، أو تلغيه. "
+                "ولحجز جديد اكتب: حجز موعد جديد 📅"
+            )
+
+        if any(p in norm for p in ("تواصل", "اتصل", "رقم", "هاتف", "موقع", "عنوان")):
+            return (
+                "📞 للتواصل مع العيادة استخدم خيار «تواصل مع العيادة» من القائمة، "
+                "أو اكتب رسالتك هون."
+            )
+
+        return None
+
+    def _handle_terminal_state(self, text: str) -> tuple[str, UIAction, dict]:
+        raw = (text or "").strip()
+        norm = normalize(raw)
+
+        if self.state == State.CANCELLED and (_looks_like_decline(norm) or _matches_any_token(norm, CANCEL_WORDS)):
+            return self._reply(
+                "تمام، ما في مشكلة. إذا احتجت أي شي لاحقاً أنا هون. 👋",
+                UIAction.SHOW_MAIN_MENU,
+            )
+
+        meta = self._terminal_meta_reply(raw, norm)
+        if meta:
+            return self._reply(meta, UIAction.SHOW_MAIN_MENU)
+
+        return self._reply(
+            "تم إنهاء الطلب السابق. إذا بدك حجز جديد اكتب: حجز موعد جديد 📅",
+            UIAction.SHOW_MAIN_MENU,
+        )
 
     def _is_new_booking_request(self, text: str) -> bool:
         lowered = (text or "").lower().strip()
