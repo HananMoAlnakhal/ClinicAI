@@ -239,12 +239,16 @@ def fallback_reply(
     """Template reply when LLM is unavailable."""
     merged = merge_rule_extracted(user_message, collected)
     missing = missing_required_fields(collected, required)
-    rule_intent = detect_rule_intent(user_message, rule_hint=rule_hint)
+    rule_intent = detect_rule_intent(user_message, rule_hint=rule_hint, phase=phase)
+
 
     if phase == "CONFIRM":
+        confirm_intent = detect_confirm_intent(user_message) or rule_intent
+        if confirm_intent in VALID_INTENTS:
+            return BookingTurnResult(reply="", intent=confirm_intent, extracted=merged)
         return BookingTurnResult(
-            reply="لسا معك بالحجز 🙂 بدك تأكيد الموعد، تشوف وقت ثاني، أو نلغي؟",
-            intent=rule_intent or "continue",
+            reply="لسا معك بالحجز. بدك تأكيد الموعد، تشوف وقت ثاني، أو نلغي؟",
+            intent="continue",
             extracted=merged,
         )
 
@@ -299,10 +303,58 @@ def fallback_reply(
     )
 
 
-def detect_rule_intent(user_message: str, *, rule_hint: str | None = None) -> str | None:
+def detect_confirm_intent(user_message: str) -> str | None:
+    """Map Palestinian Arabic at CONFIRM to FSM intents (backup when LLM JSON fails)."""
+    norm = normalize(user_message or "").lower()
+    if not norm:
+        return None
+
+    cancel_tokens = ("الغاء", "إلغاء", "الغي", "إلغي", "كنسل", "cancel", "لا ")
+    if any(t in norm for t in cancel_tokens) and not any(
+        w in norm for w in ("بدي", "اريد", "حاب", "موعد")
+    ):
+        return "decline"
+
+    confirm_tokens = (
+        "نعم", "ايوه", "آيوه", "تمام", "ماشي", "موافق", "احجز", "تاكيد", "تأكيد", "اه", "آه", "ايه", "يلا", "ok",
+    )
+    if any(t in norm for t in confirm_tokens):
+        return "confirm"
+
+    next_slot_phrases = (
+        "موعد آخر", "موعد تاني", "موعد ثاني", "وقت تاني", "وقت ثاني",
+        "غير الموعد", "بدي غير", "بدي اغير", "بدي أغير", "مش هاد", "مو بدي هاد",
+        "🔄",
+    )
+    if any(p in norm for p in next_slot_phrases):
+        return "next_slot"
+
+    if any(p in norm for p in ("اشوف المواعيد", "شو المواعيد", "خيارات", "بدائل", "فرجيني", "ورجيني")):
+        return "slot_list"
+
+    edit_phrases = (
+        "تعديل", "تعديل الموعد", "غير الوقت", "بدي وقت", "بدي موعد بكرا",
+        "بدي موعد اليوم", "بدي موعد", "✏️",
+    )
+    if any(p in norm for p in edit_phrases):
+        return "edit_time"
+
+    return None
+
+
+def detect_rule_intent(
+    user_message: str,
+    *,
+    rule_hint: str | None = None,
+    phase: str = "CHATTING",
+) -> str | None:
     """Rule-based intent hints merged with LLM output (operations stay rule-driven)."""
     if rule_hint:
         return rule_hint
+    if phase == "CONFIRM":
+        confirm_intent = detect_confirm_intent(user_message)
+        if confirm_intent:
+            return confirm_intent
     norm = normalize(user_message or "").lower()
     if not norm:
         return None
@@ -340,7 +392,7 @@ async def run_booking_turn(
     required = required_fields or ["name", "complaint", "urgency_score", "time_pref"]
     text = (user_message or "").strip()
     op_ctx = dict(operation_context or {})
-    rule_intent = detect_rule_intent(text, rule_hint=op_ctx.get("rule_hint"))
+    rule_intent = detect_rule_intent(text, rule_hint=op_ctx.get("rule_hint"), phase=phase)
     if rule_intent and "rule_hint" not in op_ctx:
         op_ctx["rule_hint"] = rule_intent
 

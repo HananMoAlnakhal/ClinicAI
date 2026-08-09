@@ -57,7 +57,7 @@ _OFF_TOPIC_MARKERS = (
 PRIMARY_MAX_RETRIES = 3
 PRIMARY_RETRY_BACKOFF_S = (0.5, 1.0, 2.0)
 TRANSIENT_PRIMARY_COOLDOWN_S = 30.0
-
+PRIMARY_BILLING_COOLDOWN_S = 300.0  # OpenRouter 402 — credits won't recover quickly
 
 class GeminiClient:
     """Primary: OpenRouter (gpt-4.1-mini). Fallback: Google Gemma."""
@@ -124,7 +124,18 @@ class GeminiClient:
         logger.warning("Primary LLM model paused for %.0fs (%s)", seconds, reason)
 
     @staticmethod
+    def _is_payment_required_error(exc: Exception) -> bool:
+        """OpenRouter 402 — insufficient credits / payment required."""
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            return exc.response.status_code == 402
+        err = str(exc).lower()
+        return "402" in err or "payment required" in err or "payment_required" in err
+
+    @staticmethod
     def _is_quota_error(exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            if exc.response.status_code == 429:
+                return True
         err = str(exc).lower()
         return (
             "429" in err
@@ -136,6 +147,8 @@ class GeminiClient:
 
     @staticmethod
     def _cooldown_seconds(exc: Exception) -> float | None:
+        if GeminiClient._is_payment_required_error(exc):
+            return PRIMARY_BILLING_COOLDOWN_S
         if GeminiClient._is_quota_error(exc):
             return 60.0
         if GeminiClient._is_transient_error(exc):
@@ -181,7 +194,11 @@ class GeminiClient:
 
     @staticmethod
     def _should_fallback_to_gemini(exc: Exception) -> bool:
-        return GeminiClient._is_quota_error(exc) or GeminiClient._is_transient_error(exc)
+        return (
+            GeminiClient._is_payment_required_error(exc)
+            or GeminiClient._is_quota_error(exc)
+            or GeminiClient._is_transient_error(exc)
+        )
 
     async def _call_primary_with_retries(self, prompt: str, max_tokens: int) -> str:
         last_exc: Exception | None = None
@@ -240,9 +257,14 @@ class GeminiClient:
         }
         with httpx.Client(timeout=15.0, trust_env=False, proxy=None) as http:
             response = http.post(url, headers=headers, json=payload)
-            if response.status_code == 429:
-                raise Exception(f"429 rate limit: {response.text[:200]}")
-            response.raise_for_status()
+            if response.status_code in (402, 429):
+                body = (response.text or "")[:300]
+                raise Exception(f"{response.status_code}: {body}")
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body = (exc.response.text or "")[:300] if exc.response is not None else ""
+                raise Exception(f"{exc.response.status_code if exc.response else 'http'}: {body}") from exc
             data = response.json()
         choices = data.get("choices") or []
         if not choices:
@@ -288,24 +310,24 @@ class GeminiClient:
             ):
                 cooldown = self._cooldown_seconds(exc)
                 if cooldown:
-                    reason = (
-                        "API quota/rate limit"
-                        if self._is_quota_error(exc)
-                        else "transient network error"
-                    )
+                    if self._is_payment_required_error(exc):
+                        reason = "OpenRouter payment required (insufficient credits)"
+                    elif self._is_quota_error(exc):
+                        reason = "API quota/rate limit"
+                    else:
+                        reason = "transient network error"
                     self._enter_primary_cooldown(cooldown, reason)
                 return await self._invoke_fallback(prompt, max_tokens)
 
             cooldown = self._cooldown_seconds(exc)
             if cooldown and is_primary:
-                reason = (
-                    "API quota/rate limit"
-                    if self._is_quota_error(exc)
-                    else "transient network error"
-                )
+                if self._is_payment_required_error(exc):
+                    reason = "OpenRouter payment required (insufficient credits)"
+                elif self._is_quota_error(exc):
+                    reason = "API quota/rate limit"
+                else:
+                    reason = "transient network error"
                 self._enter_primary_cooldown(cooldown, reason)
-            else:
-                logger.warning("LLM ask failed (%s): %s", model, exc)
             return ""
 
     @staticmethod
@@ -457,7 +479,16 @@ class GeminiClient:
 
         phase_hints = {
             "CHATTING": "اجمع الاسم والشكوى والأولوية ووقت الموعد المفضل.",
-            "CONFIRM": "المريض بمرحلة تأكيد موعد مقترح — افهم موافقة/رفض/تغيير وقت/موعد آخر.",
+            "CONFIRM": (
+                "المريض بمرحلة تأكيد موعد مقترح. حوّل كلامه الطبيعي إلى intent واحد فقط:\n"
+                "- confirm: نعم، تمام، موافق، احجز، يلا\n"
+                "- decline: لا، ما بدي، إلغاء\n"
+                "- next_slot: موعد آخر، وقت تاني، بدي أغيره، مش هاد الموعد\n"
+                "- edit_time: تعديل، غير الوقت، بدي موعد بكرا/اليوم\n"
+                "- slot_list: شو المواعيد، فرجيني الخيارات\n"
+                "- cancel: إلغاء الحجز\n"
+                "لا تترك intent=continue إذا النية واضحة."
+            ),
             "GP_FALLBACK": "التخصص المطلوب غير متوفر — اعرض الطب العام وافهم موافقة أو رفض.",
             "TERMINAL": "انتهى الحجز السابق — ساعد بالاستعلام أو حجز جديد أو توضيح الحالة.",
         }
@@ -475,6 +506,8 @@ class GeminiClient:
             "لا تشخيص طبي. لا أزرار. لا تكرر أسئلة عن معلومات موجودة.\n\n"
             "intents: continue, confirm, decline, cancel, accept_gp, reject_gp, inquiry, contact, "
             "new_booking, next_slot, slot_list, edit_time, off_topic\n\n"
+            "مهم: intent يحدد العملية التي ينفذها النظام (ليس مجرد رد).\n"
+            "أمثلة CONFIRM: «وقت تاني»→next_slot، «بدي أغيره»→next_slot، «تعديل»→edit_time، «نعم»→confirm.\n\n"
             "أرجع JSON فقط:\n"
             + _json.dumps(
                 {

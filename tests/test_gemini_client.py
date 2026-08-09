@@ -122,3 +122,34 @@ def test_ask_switches_to_fallback_on_transient_after_retries(fresh_llm_client):
     assert calls.count("openai/gpt-4.1-mini") == 3
     assert "gemma-4-31b-it" in calls
     assert client.active_model == "gemma-4-31b-it"
+
+def test_is_payment_required_error_detects_402():
+    from nlp.gemini_client import GeminiClient
+
+    exc = Exception(
+        "Client error '402 Payment Required' for url "
+        "'https://openrouter.ai/api/v1/chat/completions'"
+    )
+    assert GeminiClient._is_payment_required_error(exc) is True
+    assert GeminiClient._should_fallback_to_gemini(exc) is True
+
+def test_ask_switches_to_fallback_on_openrouter_402(fresh_llm_client):
+    client = fresh_llm_client
+    calls: list[str] = []
+
+    def fake_generate(model: str, prompt: str, max_tokens: int) -> str:
+        calls.append(model)
+        if model == "openai/gpt-4.1-mini":
+            raise Exception(
+                "Client error '402 Payment Required' for url "
+                "'https://openrouter.ai/api/v1/chat/completions'"
+            )
+        return "رد من gemma"
+
+    client._generate_sync = fake_generate  # type: ignore[method-assign]
+
+    reply = run_async(client.ask("مرحبا", max_tokens=50))
+    assert reply == "رد من gemma"
+    assert calls == ["openai/gpt-4.1-mini", "gemma-4-31b-it"]
+    assert client.active_model == "gemma-4-31b-it"
+    assert client.is_ready is True

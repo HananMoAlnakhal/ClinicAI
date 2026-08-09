@@ -14,7 +14,9 @@ Designed for Palestinian Arabic (informal dialect), with local Whisper speech-to
 - **Rule-based Arabic specialty classifier** with LLM fallback when rules are inconclusive
 - **Priority engine** (P1 / P2 / P3) from complaint, urgency, follow-up, specialty, and timing signals
 - **Natural-language handling** at confirmation (informal yes/no, “why?”, slot browsing, decline)
-- Main menu actions via free text: new booking, appointment inquiry, cancel, contact clinic
+- **Free-text commands** (no reply keyboard): new booking, appointment inquiry, cancel, contact clinic — e.g. «حجز موعد جديد», «شو موعدي», «إلغاء موعد»
+- **One Telegram account = one patient record** (`telegram_id` is unique); booking for another person overwrites the stored name on the same account
+- **No reschedule after confirmation** — change time only before final confirm (`edit_time`); after that: inquiry, cancel latest appointment, or start a new booking
 - **Voice messages**: Whisper transcription; optional TTS voice replies (`auto` mode replies with voice when the patient sent voice)
 - FSM sessions persisted in the database (survives bot restarts)
 
@@ -37,6 +39,7 @@ Designed for Palestinian Arabic (informal dialect), with local Whisper speech-to
 - **Duplicate booking prevention**: no overlapping active appointments; no same-specialty same-day duplicates
 - Waitlist when no slot is available
 - Atomic slot booking with re-read before commit
+- **Patient identity**: one `Patient` row per Telegram user; duplicate/overlap guards apply per account, not per displayed name
 
 ---
 
@@ -57,6 +60,7 @@ flowchart LR
         DFSM[Doctor FSM]
         SCH[Scheduler + Classifier]
         NLP[NLP / LLM Client]
+        BA[booking_agent]
         STT[voice/stt.py]
         TTS[voice/tts.py]
         API[FastAPI routes]
@@ -73,6 +77,8 @@ flowchart LR
     BOT --> DFSM
     PFSM --> SCH
     PFSM --> NLP
+    PFSM --> BA
+    BA --> NLP
     DFSM --> NLP
     BOT --> STT
     BOT --> TTS
@@ -170,7 +176,7 @@ Expected console output:
 ✅ Bot is running (Telegram: direct). Press Ctrl+C to stop.
 ```
 
-Open the dashboard at `http://localhost:8000` and message your bot on Telegram.
+Open the dashboard at `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>` (default `http://127.0.0.1:8000` or `http://localhost:8000` from `.env.example`) and message your bot on Telegram.
 
 ---
 
@@ -189,12 +195,10 @@ Copy `.env.example` to `.env`. **Never commit `.env`** — it is listed in `.git
 | `OPENROUTER_API_KEY` | OpenRouter API key | — |
 | `LLM_PRIMARY_MODEL` | Primary model slug | `openai/gpt-4.1-mini` |
 | `GEMINI_API_KEY` | Google Gemini API key | — |
-| `LLM_FALLBACK_MODEL` | Fallback model | `gemma-4-31b-it` |
+| `LLM_FALLBACK_MODEL` | Fallback model | `gemini-2.0-flash` |
 | `TTS_ENABLED` | Enable text-to-speech | `true` |
 | `TTS_RESPONSE_MODE` | `text`, `voice`, `both`, `auto` | `auto` |
 | `TTS_VOICE` | Edge TTS voice name | `ar-PS-SamaNeural` |
-| `CLINIC_NAME` | Used in LLM system prompts | `العيادة` |
-| `USE_SLOT_POLICY` | Unified slot ranking policy | `true` |
 
 Additional Telegram timeout and retry settings are defined in `config.py` with sensible defaults.
 
@@ -208,15 +212,18 @@ ClinicAI/
 ├── config.py               # Environment configuration
 ├── bot/
 │   ├── router.py           # Patient vs doctor routing
-│   ├── keyboards.py        # Telegram reply keyboards
+│   ├── keyboards.py        # Reply keyboards (doctor bot only; patient flow is text-only)
 │   └── handlers/
-│       ├── patient.py      # Booking, voice, TTS, menu actions
+│       ├── patient.py      # Booking, voice, TTS — routes all turns through PatientFSM
 │       └── doctor.py       # Session documentation
 ├── fsm/
-│   ├── patient_fsm.py      # Patient booking state machine
+│   ├── patient_fsm.py      # Patient booking state machine (CHATTING + scheduling pipeline)
 │   ├── doctor_fsm.py       # Doctor session state machine
 │   ├── services.py         # Booking / slot / waitlist services
-│   └── fsm_result.py       # UI action → keyboard mapping
+│   ├── fsm_result.py       # Legacy UI-action hook (returns no keyboard — text-only patient flow)
+│   └── ui_actions.py       # UI action enum
+├── data/
+│   └── levantine/          # Palestinian dialect vocab, symptoms, time phrases (extractor/normalizer)
 ├── scheduler/
 │   ├── classifier.py       # Arabic complaint → specialty rules
 │   ├── priority.py         # Priority scoring (P1–P3)
@@ -226,7 +233,10 @@ ClinicAI/
 │   ├── booking_agent.py    # LLM-first patient booking turns + rule fallback
 │   ├── gemini_client.py    # OpenRouter + Gemini LLM client
 │   ├── normalizer.py       # Arabic text normalization
-│   └── extractor.py        # Field extraction helpers
+│   ├── extractor.py        # Rule-based field extraction helpers
+│   └── doctor_extractor.py # Doctor session field extraction
+├── utils/
+│   └── datetime_utils.py
 ├── voice/
 │   ├── stt.py              # Whisper transcription
 │   └── tts.py              # Edge TTS → Telegram OGG
@@ -263,6 +273,13 @@ stateDiagram-v2
 ```
 
 The patient bot uses an LLM-driven **CHATTING** phase for natural Palestinian Arabic dialogue. When name, complaint, urgency, and time preference are complete, the existing classifier, priority engine, and slot pipeline run unchanged. Confirmation stays natural-language; there are no Telegram reply keyboards — patients type freely (e.g. «حجز موعد جديد», «شو موعدي», «إلغاء موعد»).
+
+---
+
+**Limitations (current design):**
+- `edit_time` works only in `CONFIRM` (before the appointment is saved)
+- After `FINALIZED`: inquiry (`شو موعدي`), cancel latest active appointment, or start a new booking — no in-place reschedule
+- Each Telegram `user_id` maps to a single patient; family bookings from one phone are not modeled as separate profiles
 
 ---
 
@@ -312,6 +329,7 @@ Doctors without a linked Telegram account can still appear on the dashboard; ses
 | `/logs` | Raw inbound/outbound messages |
 | `/sessions` | Clinical session records |
 | `/doctors` | Clinics, doctors, and slot overview |
+| `/slots` | Slot availability overview |
 
 ---
 
@@ -320,7 +338,8 @@ Doctors without a linked Telegram account can still appear on the dashboard; ses
 The LLM layer (`nlp/gemini_client.py` + `nlp/booking_agent.py`) is used for:
 
 - **Patient booking conversation** (`booking_turn`): natural replies + structured field extraction each turn
-- Context-aware replies when rule-based answers are inadequate
+- **Single LLM turn per patient message** via `booking_agent.run_booking_turn`: reply + intent (`confirm`, `cancel`, `inquiry`, `edit_time`, …) + field extraction
+- Rule-based `nlp/extractor.py` fallback when the LLM is unavailable
 - Answering patient questions during booking (without giving medical advice)
 - Specialty classification fallback when regex rules do not match
 
@@ -367,6 +386,8 @@ The suite covers FSM flows, scheduling policy, CRUD, classifier rules, Telegram 
 - **FSM persistence**: active sessions live in `fsm_sessions` with periodic cleanup (24h TTL).
 - **Migrations**: lightweight SQLite migrations run inside `database/db.py` on startup — no separate Alembic step.
 - **Design reference**: see `ClinicAI_theory_design_notes.md` for ERD, priority weights, and version history (V3 sessions, V4 booking guards, doctor-owned slots).
+- **Patient keyboards removed**: `ReplyKeyboardRemove` on `/start`; `keyboard_for_action()` always returns `None` for patients
+- **Legacy inline callbacks** (`menu:book`, etc.) may still work on old messages but the primary UX is free text
 
 ---
 
