@@ -314,7 +314,7 @@ async def classify_with_gemini_fallback(text: str, gemini_client) -> dict:
             + "\n\nأجب بمفتاح واحد فقط من القائمة بالإنجليزية (مثل: neurology). بدون أي نص إضافي."
         )
         try:
-            gemini_result = await gemini_client.ask(prompt, max_tokens=20)
+            gemini_result = await gemini_client.ask(prompt, max_tokens=512)
             if not (gemini_result or "").strip():
                 raise ValueError("Empty response from Gemini")
             specialty_key = _parse_gemini_specialty_key(gemini_result)

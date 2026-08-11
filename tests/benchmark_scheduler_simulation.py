@@ -105,7 +105,7 @@ def measure_performance_rules_only(dataset, warmup: int = 5):
     def run_one(case):
         cls = classify_specialty(case["input"])
         urgency = infer_urgency_score(case["input"])
-        data = _build_patient_data(case["input"])
+        data = _build_patient_data(case)
         data["specialty_hint"] = cls["specialty"]
         score_and_classify(data)
         return cls["specialty"]

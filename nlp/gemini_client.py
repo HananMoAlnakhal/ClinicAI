@@ -213,7 +213,6 @@ class GeminiClient:
             model=model,
             contents=prompt,
             config=google_types.GenerateContentConfig(
-                system_instruction=SYSTEM_CONTEXT,
                 max_output_tokens=max_tokens,
             ),
         )
