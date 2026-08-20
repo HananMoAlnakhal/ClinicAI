@@ -509,13 +509,20 @@ class PatientFSM:
         if complaint:
             complaint = dict(complaint)
             complaint['raw'] = raw
+            # The extractor may attach a broad/default specialty.  Specialty
+            # routing belongs to scheduler.classifier and must be based on the
+            # complete complaint after all required booking fields are known.
+            # Keeping an extractor default here can leak "general_practice"
+            # into the confirmation UI even when the routing rule confidently
+            # identifies a specialty such as neurology.
+            complaint.pop('specialty', None)
+            complaint.pop('specialty_ar', None)
             return complaint
 
         return {
             'raw': raw,
             'category': 'general',
             'urgency_score': 0.3,
-            'specialty': 'general_practice',
         }
 
     def _missing_fields(self) -> list[str]:
@@ -571,6 +578,18 @@ class PatientFSM:
             self.data["specialty_ar"] = SPECIALTY_NAMES_AR["general_practice"]
             return await self._score_and_find_slot()
 
+        # A new classification is authoritative.  Remove stale suggestions
+        # restored from an older snapshot or produced by field extraction so
+        # they cannot override the classifier result shown to the patient.
+        for key in (
+            "specialty_hint",
+            "specialty_ar",
+            "specialty_method",
+            "specialty_confidence",
+            "specialty_confirmed_by_patient",
+        ):
+            self.data.pop(key, None)
+
         norm_complaint = normalize(self.data.get("complaint", {}).get("raw", ""))
         unsupported = self.services.detect_unsupported(norm_complaint)
         if unsupported:
@@ -594,6 +613,15 @@ class PatientFSM:
         self.data["specialty_ar"] = spec_result["specialty_ar"]
         self.data["specialty_method"] = spec_result.get("method")
         self.data["specialty_confidence"] = spec_result.get("confidence")
+
+        logger.info(
+            "Specialty routed user_id=%s specialty=%s method=%s confidence=%s complaint=%r",
+            self.user_id,
+            self.data["specialty_hint"],
+            self.data["specialty_method"],
+            self.data["specialty_confidence"],
+            norm_complaint,
+        )
 
         return await self._score_and_find_slot()
 
